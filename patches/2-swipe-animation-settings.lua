@@ -27,7 +27,7 @@ local ok, err = pcall(function()
                 else
                     self:saveSetting(key, false)
                 end
-                return
+                return self
             end
             return orig_flipNilOrFalse(self, key)
         end
