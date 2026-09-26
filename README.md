@@ -1,118 +1,180 @@
-**简体中文** | [English](./README_en.md)
+# Swipe Animation for KOReader
 
-# Swipe_Animation
+A software page-turn **"wipe" animation** for KOReader on e-ink devices, packaged as a
+**regular, self-contained plugin**: drop one folder into `koreader/plugins/` and you are
+done. No `patches/` folder, no KOReader file is overwritten, nothing to restore when you
+remove it.
 
-KOReader 软件翻页动画补丁（擦除渐显效果）
+This is a fork of
+[koplugin-swipe-animation/Swipe_Animation.koplugin](https://github.com/koplugin-swipe-animation/Swipe_Animation.koplugin)
+(GPLv3). The animation, its tuning, the settings keys and the menu come from there and
+existing settings carry over. What changed:
 
-为 KOReader 提供流畅的「擦除渐显」（wipe）翻页动画效果，特别适合没有硬件翻页动画支持的设备。
+| | Original patch set (v4.x) | This plugin (v5.x) |
+|---|---|---|
+| Install | Copy three files into `koreader/patches/` **and overwrite** `koreader/frontend/ui/uimanager.lua` with a bundled copy | Copy the `swipeanimation.koplugin` folder into `koreader/plugins/` |
+| Uninstall | Delete the patches and restore the original `uimanager.lua` from a backup | Delete the folder |
+| KOReader updates | The bundled `uimanager.lua` has to be re-merged on every KOReader release | Nothing to do |
+| Framebuffer work per turn | Four full-frame copies/blits (eight on colour devices) and two large allocations | None |
+| Kobo MTK pre-animation sync | Always on | Switchable in the menu |
+| Full-refresh rules (clearing, chapters, images) | Re-implemented inside the patch | KOReader's own rules and settings apply |
+| Strip count | Fixed (8 portrait / 6 landscape) | Configurable per orientation |
 
-## 升级注意
+## Features
 
-自 **V4.0** 起，本插件不再依赖或修改 `ffi/framebuffer.lua`。
+* Smooth strip-based page-turn animation in both directions, portrait and landscape
+* Works on devices without hardware animation support (all Kobo, older Kindles, …)
+* Also animates fixed-layout documents (PDF, DjVu, CBZ, …)
+* Strip refresh mode: **UI** (default) or **Fast** (quicker, more ghosting)
+* Separate frame delay (ms) and strip count for portrait and landscape; delay `0` means no
+  extra pause
+* **Mild global refresh**: replace the periodic full (flashing) refresh by a partial one
+* Kobo MTK (Clara BW / Colour, Libra Colour, …) refresh fence (switchable) and
+  driver-aligned strips
+* English, Chinese and Brazilian Portuguese menu strings
 
-**从 V4.0 之前的旧版本直接升级**的用户，请按以下步骤操作：
+## Requirements and tested devices
 
-1. 使用本仓库 `restore-files` 文件夹中的文件还原系统文件（直接覆盖即可）。  
-2. 手动删除 `koreader/patches/` 目录下的旧补丁文件：
-   - `1-mtk-swipe-direction.lua`
-   - `2-mtk-swipe-direction.lua`
-   - `2-swipe-full-refresh-judgment.lua`
+* KOReader **2026.07.1 or later** (the release that introduced the page-turn animation
+  plumbing in `ReaderView`).
+* **Tested only on a Kobo Clara BW** so far. The code paths for other Kobo models, Kindles
+  and other Linux e-ink devices are the same as in the original patch set, which was
+  tested widely, but they have not been exercised with this plugin yet. Reports welcome.
+* Not recommended on Android, for the same reason as upstream: the software animation does
+  not look good there.
 
-## 功能特点
+## Installation
 
-- 翻页动画更流畅、速度更快
-- 减少翻页过程中的屏幕抖动
-- 可自定义刷新速率
-- 支持全方向滑动翻页
-- 优化夜间模式体验
-- **新增**：MTK 设备支持（Kobo、Kindle 2022 及以上）
-- **新增**：支持 PDF、DjVu、CBZ 等固定排版格式的翻页动画
-- **新增**：支持自定义横/竖屏的翻页动画延迟时间（毫秒）（可通过 **设置（齿轮图标） -> 动作手势 -> 翻页动画设置** 进行微调，免去手动修改 lua 文件的麻烦）
-- **新增**：支持自定义刷新模式，UI / Fast 两种模式可选
-- **新增**：轻度全局刷新选项，优化纯文字阅读体验
+1. Download `swipeanimation.koplugin.zip` from the
+   [latest release](https://github.com/glaucon1984/swipeanimation.koplugin/releases/latest)
+   and unzip it. You get a folder named `swipeanimation.koplugin`.
+2. Copy that folder into `koreader/plugins/` on the device (for example
+   `.adds/koreader/plugins/` on Kobo, `koreader/plugins/` on Kindle).
+3. Restart KOReader.
+4. Open a book. The animation is enabled by default the first time the plugin runs. It can
+   be toggled under **Settings (⚙) → Taps and gestures → Page turns → Page turn
+   animations** (or at the top of the settings menu below).
 
-## 安装方法
+If you clone this repository instead of using the release zip, make sure the folder ends
+up named exactly `swipeanimation.koplugin`.
 
-> **重要提醒**：安装前：
->
-> 1.请确认您的koreader版本为2026.07.1或更新版本。
-> 
-> 2.请务必备份 `koreader` 文件夹。
+### Migrating from the original patch set
 
-### Kindle / Kobo 设备（Linux版）安装步骤
+Remove the patch version first; running both would animate twice. Follow the
+[uninstallation steps in the original README](https://github.com/koplugin-swipe-animation/Swipe_Animation.koplugin/blob/main/README_en.md#uninstallation):
+delete the three `2-*.lua` files from `koreader/patches/` and restore the stock
+`koreader/frontend/ui/uimanager.lua` (from the original repository's `restore-files`
+folder, or by reinstalling KOReader over itself). Then install this plugin as above. Your
+delay, refresh-mode and mild-refresh settings are kept.
 
-1. 用 USB 线连接设备到电脑。
-2. **先备份** 原有的 `koreader` 文件夹。
-3. 将您下载解压后的文件夹根目录中的 `frontend` 和 `patches` 文件夹，**复制** 并**覆盖**到设备上的 `koreader` 目录中（**注意**：请勿删除原文件夹）。
-   - 常见路径：`D:\.adds\koreader\`
-   - **特别说明**：如果您的设备原本就支持原生翻页动画，且您不希望使用本补丁的软件擦除动画，而仅希望为 PDF 文件开启设备原生的硬件级翻页动画，您可以选择**只将 `patches` 文件夹里的 `2-pdf-animation.lua`**复制到设备上的 `koreader/patches/` 目录下即可。
-4. 安全弹出设备后重启 KOReader。
-5. 开启动画：
-   - 打开任意书籍 -> 点击顶部菜单 -> **设置（齿轮图标）** -> **动作手势** -> **翻页**
-   - 勾选 **「翻页动画」**
-6. 调整延迟（可选）：
-   - 进入 **设置（齿轮图标） -> 动作手势 -> 翻页动画设置**，可以直接设置横竖屏的翻页延时（ms），长按该选项可查看选项说明。
-7. 调整全局刷新模式（可选）：
-   - 进入**设置（齿轮图标） -> 动作手势 -> 翻页动画设置**，可以勾选或取消**轻度全局刷新**，长按该选项可查看选项说明。
-  
-### 卸载方法
+## Uninstallation
 
-1. 使用本仓库 `restore-files` 文件夹中的 `frontend`文件，覆盖设备上对应的系统文件。  
-2. 删除设备 `koreader/patches/` 目录下的以下文件：
-   - `2-pdf-animation.lua`
-   - `2-swipe-animation-core.lua`
-   - `2-swipe-animation-settings.lua`
+Delete `koreader/plugins/swipeanimation.koplugin` and restart KOReader. Nothing else was
+touched.
 
-## 版本兼容
+## Settings
 
-本补丁自带的 `frontend/ui/uimanager.lua` 基于以下上游版本构建：
-
-- KOReader release：（2026-07-01）
-
-## 支持设备
-
-- **已充分测试**：Kobo 系列，Kindle 系列（包括 KV、KO 和 KPW 系列）及大多数运行 KOReader 的 Linux 墨水屏设备
-- **安卓设备支持**：因在安卓设备上此插件表现不佳，暂不支持安卓设备
-
-## 菜单结构
 ```
-设置（⚙）
-├── 手势
-│   ├── 翻页
-│   │   └── ☑ 翻页动画
-│   └── 翻页动画设置
-│       ├── 翻页动画刷新模式
-│       │   ├── ○ UI刷新
-│       │   └── ○ Fast刷新
-│       ├── 竖屏动画帧延迟：毫秒 
-│       ├── 横屏动画帧延迟：毫秒
-│       └── ☑ 轻度全局刷新
-└── 屏幕
-    └── 墨水屏设置
-        └── 完全刷新速率
+Settings (⚙)
+└── Taps and gestures
+    ├── Page turns
+    │   └── ☑ Page turn animations
+    └── Swipe animation settings
+        ├── ☑ Page turn animations        (same setting as above)
+        ├── Swipe animation refresh mode
+        │   ├── ○ UI refresh (default, recommended)
+        │   └── ○ Fast refresh (fastest, more ghosting)
+        ├── Portrait / Landscape animation frame delay: … ms
+        ├── Portrait / Landscape animation steps: …
+        ├── ☑ Mild global refresh
+        └── ☑ Kobo MTK: sync panel before animation   (Kobo MTK devices only)
 ```
-## 常见问题
-**Q：KOreader安装补丁后闪退怎么办？** 
 
-A：请先使用备份恢复原始文件。常见原因包括：
-1. *KOReader 版本过旧。* 请先将 KOReader 更新至最新版本，然后重新安装本补丁。
-2. *使用 macOS 复制文件。* 请先恢复原始文件，再手动删除设备中对应的原文件，然后重新复制补丁中的新文件。
-3. *安装步骤有误。* 请恢复备份后，按照安装说明重新安装本补丁。
+Long-press an entry for its description.
 
-**Q：没有出现“翻页动画”选项？/出现“翻页动画”选项但没有效果？**  
+### Chapter-boundary flashes
 
-A：1. 请确认您在书籍页面进行操作。2. 如确认无误，请先更新 KOReader 到最新版本，再重新安装本补丁。
+The plugin follows KOReader's own refresh rules, so KOReader's chapter option behaves
+exactly as documented: with **Always flash on chapter boundaries** on, KOReader flashes on
+the first page of a chapter *and* when leaving it (the second page going forward, the
+previous chapter's last page going backward). To flash only once, on the chapter's first
+page, enable **Settings (⚙) → Screen → E-ink settings → Full refresh rate → Always flash
+on chapter boundaries → except on the second page of a new chapter**. The original patch
+flashed only once because its re-implementation of this rule never saw the previous page
+number.
 
-**Q：每翻一页都黑白闪烁？**  
+## How it works without patching KOReader
 
-A：在 **设置 -> 屏幕 -> 墨水屏设置 -> 完全刷新速率** 中调整数值。
+The original had to edit `UIManager:_repaint()` because the animation must run *after*
+the new page is painted into the framebuffer and *instead of* the queued screen refresh.
+The plugin gets the same seam at runtime:
 
-## 版本与贡献
+* `UIManager` caches `Screen.refreshPartial()` and friends when it loads, but those
+  functions dispatch dynamically to `Screen.refreshPartialImp()` etc. The plugin wraps the
+  `*Imp` methods on the live `Screen` object, so it sees every physical refresh.
+* `Screen:beforePaint()` / `Screen:afterPaint()` bracket each repaint and give the plugin
+  a place to arm itself for a page turn and to reset afterwards.
+* `ReaderView:onPageChangeAnimation()` already calls `Screen:setSwipeAnimations(true)` and
+  `Screen:setSwipeDirection(forward)` before a page turn. On non-MTK devices those are
+  empty stubs, so the plugin wraps them to record the request, and it makes
+  `Device:canDoSwipeAnimation()` answer `true` while a book is open so KOReader shows the
+  toggle and fires the event.
+* For paged documents, `ReaderPaging._gotoPage()` is wrapped to emit the same event
+  (upstream only emits it from `ReaderRolling`).
 
-- 原作者：`xhs:5699990012`
-- nuku 改进版
-- v3.x 版本进一步优化与 MTK 支持：`Echoes`、`小红薯6809667F`、`斯普特尼克的漫游`
+### Performance
 
-## 许可证
+An e-ink panel keeps showing whatever it last displayed in any region that is not
+refreshed. So once KOReader has painted the new page into the framebuffer, the wipe is
+simply a sequence of strip refreshes of the framebuffer as it is. The plugin therefore does
+**no framebuffer copies and no blits at all**; the only work per turn is the strip refresh
+calls and the optional pause between them. (The original snapshotted the framebuffer
+before the page was painted, copied the new page, blitted the old page back and then
+blitted each strip.)
 
-本项目遵循 KOReader 相同许可证（GPLv3）。
+On Kobo MTK devices the original always issued a "fence" before the strips: wait for the
+previous update, send one no-change full-screen AUTO update, wait for it. The plugin does
+the same from the first `beforePaint()` of the turn, while the framebuffer still holds the
+previous page, so it needs no snapshot either. It is a switch (*Kobo MTK: sync panel before
+animation*, on by default); if page turns look just as even with it off, leave it off and
+the first strip starts sooner.
+
+The remaining knobs are the strip count and the frame delay. Fewer strips or a shorter
+delay make the turn faster; *Fast refresh* (DU waveform) makes each strip cheaper on MTK
+Kobos in particular, because the driver does not wait for the submission of DU updates, at
+the cost of more ghosting.
+
+### Full refreshes
+
+The plugin does **not** re-implement KOReader's full-refresh rules. The periodic clearing
+refresh ("Full refresh rate"), chapter-boundary flashes and image-page flashes all arrive as
+a *flashing* refresh in the repaint queue, so the plugin lets those through unanimated (or
+downgrades them to a partial refresh when *Mild global refresh* is on). Behaviour follows
+KOReader's own settings exactly.
+
+## Development
+
+The plugin is plain Lua with no build step. A syntax check is enough to catch most
+mistakes:
+
+```bash
+luajit -bl main.lua > /dev/null && luajit -bl swipehook.lua > /dev/null && luajit -bl swipemenu.lua > /dev/null
+```
+
+Files:
+
+* `main.lua` — plugin entry point (installs the hooks on first use, registers the menu)
+* `swipehook.lua` — runtime hooks and the animation itself
+* `swipemenu.lua` — settings menu and translations
+* `_meta.lua` — plugin metadata
+
+## Credits
+
+* Original patch set: `xhs:5699990012` (original author), **nuku**, **Echoes**,
+  **小红薯6809667F**, **斯普特尼克的漫游** and the other
+  [Swipe_Animation contributors](https://github.com/koplugin-swipe-animation/Swipe_Animation.koplugin/graphs/contributors)
+* Plugin re-packaging, runtime hooks and performance work: this repository
+
+## License
+
+GPLv3, same as KOReader and the original patch set. See `LICENSE`.
