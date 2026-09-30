@@ -14,9 +14,8 @@
 
       * Screen:beforePaint() / Screen:afterPaint() bracket every repaint
         that painted a widget. The first beforePaint() of a page-turn
-        repaint still has the previous page in the framebuffer (useful for
-        the Kobo MTK fence), and afterPaint() is where per-repaint state is
-        reset.
+        repaint still has the previous page in the framebuffer, and
+        afterPaint() is where per-repaint state is reset.
 
       * ReaderView:onPageChangeAnimation() calls Screen:setSwipeAnimations(true)
         and Screen:setSwipeDirection(forward) right before a page-turn
@@ -25,20 +24,32 @@
         non-MTK devices, so we wrap them to record the request, and we make
         canDoSwipeAnimation() answer true while the plugin is active.
 
-    How the wipe is drawn:
+    Two animation engines, chosen by display class (Hook.displayClass()):
 
-      An e-ink panel keeps showing whatever it last displayed in any region
-      that is not refreshed. So once KOReader has painted the new page into
-      the framebuffer, the wipe is nothing more than refreshing vertical
-      strips of it one after another: the unrefreshed strips still show the
-      previous page. No snapshot, no compositing, no buffer copies.
+      "eink"  E-ink screen on a Linux e-reader (Kobo, Kindle, PocketBook...).
+              An e-ink panel keeps showing whatever it last displayed in any
+              region that is not refreshed. So once KOReader has painted the
+              new page into the framebuffer, the wipe is nothing more than
+              refreshing vertical strips of it one after another. No
+              snapshot, no compositing, no buffer copies.
+
+      "lcd"   No e-ink screen (Android phones and tablets, the SDL desktop
+              build). There every refresh call posts the *whole* window, so
+              strips cannot work. Instead the old page is snapshotted, and
+              for a fixed duration each frame composites old and new pages
+              in the framebuffer (wipe or slide) and posts it.
+
+      "inert" Android devices with an e-ink screen: window posts go through
+              the Android display stack, which the plugin cannot control.
+              The plugin stays completely passive there.
 
     Full-refresh decisions (periodic clearing refresh, chapter boundaries,
-    image-heavy pages) are left to KOReader itself: every one of them ends
-    up as a *flashing* refresh in the refresh queue of that repaint. We
-    recognise those and let them through without animating, optionally
-    downgraded to a plain partial refresh by the "Mild global refresh"
-    option.
+    image-heavy pages) are left to KOReader itself: on e-ink every one of
+    them ends up as a *flashing* refresh in the refresh queue of that
+    repaint. We recognise those and let them through without animating,
+    optionally downgraded to a plain partial refresh by the "Mild global
+    refresh" option. On LCD there is no flash to preserve, so every
+    page-turn refresh animates.
 ]]
 
 local Device = require("device")
@@ -53,9 +64,13 @@ local Hook = {
     defaults = {
         delay_ms = { landscape = 10, portrait = 20 },
         steps = { landscape = 6, portrait = 8 },
+        lcd_duration_ms = 250,
+        lcd_style = "slide",
     },
     MIN_STEPS = 2,
     MAX_STEPS = 32,
+    MIN_LCD_DURATION_MS = 50,
+    MAX_LCD_DURATION_MS = 2000,
 }
 
 local IMP_METHODS = {
@@ -80,6 +95,29 @@ local FLASHING = {
 
 -- Only animate refreshes that cover at least this share of the screen.
 local MIN_AREA_RATIO = 0.5
+
+-- Safety net for the time-based LCD loop.
+local MAX_LCD_FRAMES = 600
+
+local function freeBuffer(bb)
+    if bb then pcall(bb.free, bb) end
+end
+
+-- ==================== display class ====================
+
+function Hook.displayClass()
+    local eink = Device.hasEinkScreen and Device:hasEinkScreen()
+    local android = Device.isAndroid and Device:isAndroid()
+    if eink then
+        if android then return "inert" end
+        return "eink"
+    end
+    return "lcd"
+end
+
+function Hook.isEink() return Hook.displayClass() == "eink" end
+function Hook.isLCD() return Hook.displayClass() == "lcd" end
+function Hook.isSupported() return Hook.displayClass() ~= "inert" end
 
 -- ==================== settings helpers (shared with the menu) ====================
 
@@ -192,7 +230,56 @@ function Hook.setMTKFenceEnabled(enabled)
     end
 end
 
--- ==================== the wipe itself ====================
+-- LCD engine settings.
+function Hook.getLCDStyle()
+    local style = G_reader_settings:readSetting("swipe_animation_lcd_style")
+    if style == "wipe" or style == "slide" then return style end
+    return Hook.defaults.lcd_style
+end
+
+function Hook.setLCDStyle(style)
+    if style == "wipe" or style == "slide" then
+        G_reader_settings:saveSetting("swipe_animation_lcd_style", style)
+    else
+        G_reader_settings:delSetting("swipe_animation_lcd_style")
+    end
+end
+
+function Hook.getConfiguredLCDDurationMs()
+    local ms = tonumber(G_reader_settings:readSetting("swipe_animation_lcd_duration_ms"))
+    if ms == nil or ms < Hook.MIN_LCD_DURATION_MS then return nil end
+    return math.min(math.floor(ms), Hook.MAX_LCD_DURATION_MS)
+end
+
+function Hook.setConfiguredLCDDurationMs(ms)
+    if ms == nil or ms < Hook.MIN_LCD_DURATION_MS then
+        G_reader_settings:delSetting("swipe_animation_lcd_duration_ms")
+    else
+        G_reader_settings:saveSetting("swipe_animation_lcd_duration_ms", math.min(math.floor(ms), Hook.MAX_LCD_DURATION_MS))
+    end
+end
+
+function Hook.getLCDDurationMs()
+    return Hook.getConfiguredLCDDurationMs() or Hook.defaults.lcd_duration_ms
+end
+
+-- ==================== clock ====================
+
+-- Milliseconds from a monotonic clock. Uses KOReader's ui/time when
+-- available (fine-grained monotonic), os.clock otherwise.
+local clock_ms
+do
+    local ok, time = pcall(require, "ui/time")
+    if ok and type(time) == "table" and time.to_ms and (time.monotonic or time.now) then
+        local now = time.monotonic or time.now
+        clock_ms = function() return time.to_ms(now()) end
+    else
+        clock_ms = function() return os.clock() * 1000 end
+    end
+end
+Hook._clock_ms = clock_ms -- tests replace this
+
+-- ==================== e-ink engine: strip wipe ====================
 
 -- Split [x0, x1) into `steps` strips. Interior cuts snap to `align`
 -- (Screen.alignment_constraint, 16 on Kobo MTK) so getBoundedRect() does
@@ -224,7 +311,7 @@ Hook._buildStripEdges = buildStripEdges -- exposed for tests
 -- Reveal the new page (already in the framebuffer) strip by strip inside
 -- the refresh region. Runs with state.bypass set, so nested refresh calls
 -- go straight to the original framebuffer implementation.
-local function runWipe(state, screen, x, y, w, h, dither, forward)
+local function runStripWipe(state, screen, x, y, w, h, dither, forward)
     local landscape = screen.bb:getWidth() > screen.bb:getHeight()
 
     local delay_ms = Hook.getConfiguredDelayMs(landscape) or Hook.getDefaultDelayMs(landscape)
@@ -276,6 +363,83 @@ local function runMTKFence(state, screen)
     end
 end
 
+-- ==================== LCD engine: time-based frames ====================
+
+-- Ease-out: fast start, gentle landing.
+local function easeOut(t)
+    local u = 1 - t
+    return 1 - u * u * u
+end
+
+-- Composite one frame of progress p (0..1) into screen.bb inside the region.
+-- Returns the region that changed, for the post call.
+local function compositeFrame(screen, style, forward, old_bb, new_bb, x, y, w, h, p)
+    local amount = math.floor(w * p + 0.5)
+    if amount > w then amount = w end
+    if style == "wipe" then
+        -- Reveal the new page from one edge; only the newly uncovered slice
+        -- needs blitting, the rest is already in place.
+        if forward then
+            local left = x + w - amount
+            screen.bb:blitFrom(new_bb, left, y, left, y, amount, h)
+        else
+            screen.bb:blitFrom(new_bb, x, y, x, y, amount, h)
+        end
+    else
+        -- Slide: the old page moves out while the new one moves in.
+        local keep = w - amount
+        if forward then
+            -- Content moves left: old page shifted left by `amount`, new page
+            -- enters from the right edge.
+            if keep > 0 then
+                screen.bb:blitFrom(old_bb, x, y, x + amount, y, keep, h)
+            end
+            if amount > 0 then
+                screen.bb:blitFrom(new_bb, x + keep, y, x, y, amount, h)
+            end
+        else
+            -- Content moves right: old page shifted right, new page enters
+            -- from the left edge.
+            if keep > 0 then
+                screen.bb:blitFrom(old_bb, x + amount, y, x, y, keep, h)
+            end
+            if amount > 0 then
+                screen.bb:blitFrom(new_bb, x, y, x + keep, y, amount, h)
+            end
+        end
+    end
+end
+
+-- Animate for a fixed duration; the frame count follows the device speed.
+-- Runs with state.bypass set.
+local function runFrameAnimation(state, screen, x, y, w, h, dither, forward, old_bb, new_bb)
+    local style = Hook.getLCDStyle()
+    local duration = Hook.getLCDDurationMs()
+    local post = state.originals.refreshFastImp
+        or state.originals.refreshPartialImp
+        or state.originals.refreshFullImp
+
+    local start = Hook._clock_ms()
+    local frames = 0
+    local t = 0
+    -- Slide always needs the old page as the starting frame; wipe already
+    -- has it on screen (the framebuffer still shows it, we only post
+    -- composites), but the framebuffer holds the new page, so restore the
+    -- old one first in both cases.
+    screen.bb:blitFrom(old_bb, x, y, x, y, w, h)
+    repeat
+        local elapsed = Hook._clock_ms() - start
+        t = elapsed / duration
+        if t >= 1 or frames >= MAX_LCD_FRAMES then t = 1 end
+        compositeFrame(screen, style, forward, old_bb, new_bb, x, y, w, h, easeOut(t))
+        post(screen, x, y, w, h, dither)
+        frames = frames + 1
+    until t >= 1
+    -- Belt and braces: the final framebuffer content must be the new page.
+    screen.bb:blitFrom(new_bb, x, y, x, y, w, h)
+    state.last_frame_count = frames
+end
+
 -- ==================== hook installation ====================
 
 local function interceptRefreshImp(state, name, original)
@@ -284,8 +448,8 @@ local function interceptRefreshImp(state, name, original)
             return original(screen, x, y, w, h, dither)
         end
         -- The first refresh of an animated repaint has been consumed; drop
-        -- the rest of the queue of that repaint (the strips already covered
-        -- the region).
+        -- the rest of the queue of that repaint (the animation already
+        -- covered the region).
         if state.suppress then
             return
         end
@@ -294,10 +458,14 @@ local function interceptRefreshImp(state, name, original)
         end
 
         state.armed = false
+        local old_bb = state.old_bb
+        state.old_bb = nil
         -- Never let an MTK driver run its own animation on top of ours.
         screen.swipe_animations = false
 
-        if FLASHING[name] then
+        local lcd = state.display == "lcd"
+
+        if not lcd and FLASHING[name] then
             -- KOReader asked for a flash (clearing refresh, chapter
             -- boundary, image page): no animation, honour it.
             if Hook.isMildGlobalRefresh() and state.originals.refreshPartialImp then
@@ -311,17 +479,33 @@ local function interceptRefreshImp(state, name, original)
         local sw, sh = screen.bb:getWidth(), screen.bb:getHeight()
         x, y = x or 0, y or 0
         w, h = w or sw, h or sh
-        if w * h < MIN_AREA_RATIO * sw * sh then
+        if w * h < MIN_AREA_RATIO * sw * sh or (lcd and not old_bb) then
+            freeBuffer(old_bb)
             return original(screen, x, y, w, h, dither)
         end
 
+        local ok, err
+        local new_bb
         state.bypass = true
-        local ok, err = pcall(runWipe, state, screen, x, y, w, h, dither, state.forward)
+        if lcd then
+            new_bb = screen.bb:copy()
+            ok, err = pcall(runFrameAnimation, state, screen, x, y, w, h, dither, state.forward, old_bb, new_bb)
+        else
+            ok, err = pcall(runStripWipe, state, screen, x, y, w, h, dither, state.forward)
+        end
         state.bypass = false
         if not ok then
             logger.warn("SwipeAnimation: animation failed, falling back to a plain refresh:", err)
+            if new_bb then
+                -- Make sure the new page, not a half-composited one, is what gets shown.
+                pcall(function() screen.bb:blitFrom(new_bb, x, y, x, y, w, h) end)
+            end
+            freeBuffer(old_bb)
+            freeBuffer(new_bb)
             return original(screen, x, y, w, h, dither)
         end
+        freeBuffer(old_bb)
+        freeBuffer(new_bb)
         state.suppress = true
     end
 end
@@ -338,7 +522,12 @@ local function installScreenHooks(state)
                 state.pending = false
                 if state.active and not state.bypass and screen.bb then
                     state.armed = true
-                    runMTKFence(state, screen)
+                    if state.display == "lcd" then
+                        freeBuffer(state.old_bb)
+                        state.old_bb = screen.bb:copy()
+                    else
+                        runMTKFence(state, screen)
+                    end
                 end
             end
         end
@@ -355,6 +544,8 @@ local function installScreenHooks(state)
                 -- Painted, but no eligible refresh came through: nothing
                 -- to animate this time.
                 state.armed = false
+                freeBuffer(state.old_bb)
+                state.old_bb = nil
                 screen.swipe_animations = false
             end
         end
@@ -422,11 +613,17 @@ local function installPagingHook(state)
 end
 
 -- Install every hook once per KOReader process. Safe to call repeatedly.
+-- On an unsupported display class nothing is installed at all.
 function Hook.install()
     local state = Screen._swipeanimation_state
     if state then return state end
+    if not Hook.isSupported() then
+        logger.info("SwipeAnimation: unsupported display (Android e-ink), staying inert")
+        return nil
+    end
 
     state = {
+        display = Hook.displayClass(), -- "eink" or "lcd"
         active = false,   -- a reader with this plugin is open
         pending = false,  -- ReaderView asked for an animation on the next repaint
         painting = false, -- between the first beforePaint and afterPaint of a repaint
@@ -434,14 +631,16 @@ function Hook.install()
         suppress = false, -- animation done, drop the rest of the refreshes of this repaint
         bypass = false,   -- calls made by the animation itself
         forward = true,
+        old_bb = nil,     -- LCD only: snapshot of the previous page
         originals = {},
+        last_frame_count = nil,
     }
     Screen._swipeanimation_state = state
 
     installScreenHooks(state)
     installDeviceHook(state)
     installPagingHook(state)
-    logger.info("SwipeAnimation: hooks installed")
+    logger.info("SwipeAnimation: hooks installed, display class", state.display)
     return state
 end
 
@@ -452,6 +651,8 @@ function Hook.setActive(active)
     if not state.active then
         state.pending = false
         state.armed = false
+        freeBuffer(state.old_bb)
+        state.old_bb = nil
     end
 end
 

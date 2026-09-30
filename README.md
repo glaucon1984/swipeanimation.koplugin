@@ -1,9 +1,13 @@
 # Swipe Animation for KOReader
 
-A software page-turn **"wipe" animation** for KOReader on e-ink devices, packaged as a
-**regular, self-contained plugin**: drop one folder into `koreader/plugins/` and you are
-done. No `patches/` folder, no KOReader file is overwritten, nothing to restore when you
-remove it.
+A software **page-turn animation** for KOReader, packaged as a **regular, self-contained
+plugin**: drop one folder into `koreader/plugins/` and you are done. No `patches/` folder,
+no KOReader file is overwritten, nothing to restore when you remove it.
+
+On e-ink readers it is the strip **"wipe"** of the original patch. On Android phones and
+tablets (and the desktop build) it is a frame-based **slide or wipe**, because those
+displays work differently (see *How it works*). One plugin, one setting, the engine is
+picked automatically.
 
 This is a fork of
 [koplugin-swipe-animation/Swipe_Animation.koplugin](https://github.com/koplugin-swipe-animation/Swipe_Animation.koplugin)
@@ -19,11 +23,14 @@ existing settings carry over. What changed:
 | Kobo MTK pre-animation sync | Always on | Switchable in the menu |
 | Full-refresh rules (clearing, chapters, images) | Re-implemented inside the patch | KOReader's own rules and settings apply |
 | Strip count | Fixed (8 portrait / 6 landscape) | Configurable per orientation |
+| Android phones / tablets | Not supported (strips, "performance not satisfactory") | Supported since 5.1.0 with a separate frame-based engine (slide or wipe) |
 
 ## Features
 
 * Smooth strip-based page-turn animation in both directions, portrait and landscape
 * Works on devices without hardware animation support (all Kobo, older Kindles, …)
+* Android phones and tablets: time-based **slide** (default) or **wipe** with adjustable
+  duration; frame count follows the speed of the device
 * Also animates fixed-layout documents (PDF, DjVu, CBZ, …)
 * Strip refresh mode: **UI** (default) or **Fast** (quicker, more ghosting)
 * Separate frame delay (ms) and strip count for portrait and landscape; delay `0` means no
@@ -37,11 +44,13 @@ existing settings carry over. What changed:
 
 * KOReader **2026.07.1 or later** (the release that introduced the page-turn animation
   plumbing in `ReaderView`).
-* **Tested only on a Kobo Clara BW** so far. The code paths for other Kobo models, Kindles
-  and other Linux e-ink devices are the same as in the original patch set, which was
-  tested widely, but they have not been exercised with this plugin yet. Reports welcome.
-* Not recommended on Android, for the same reason as upstream: the software animation does
-  not look good there.
+* **Tested on a Kobo Clara BW** (e-ink engine) and on an **Android phone** (frame engine).
+  The e-ink code paths for other Kobo models, Kindles and other Linux e-ink devices are
+  the same as in the original patch set, which was tested widely, but they have not been
+  exercised with this plugin yet. Reports welcome.
+* **Android devices with an e-ink screen** (Onyx and similar) are not supported: their
+  screen updates go through the Android display stack, which the plugin cannot control.
+  The plugin stays inert there and only shows a notice in its menu.
 
 ## Installation
 
@@ -88,6 +97,17 @@ Settings (⚙)
         ├── Portrait / Landscape animation steps: …
         ├── ☑ Mild global refresh
         └── ☑ Kobo MTK: sync panel before animation   (Kobo MTK devices only)
+```
+
+On Android phones and tablets (and the desktop build) the submenu is:
+
+```
+    └── Swipe animation settings
+        ├── ☑ Page turn animations
+        ├── Animation style
+        │   ├── ○ Slide (new page pushes the old one)
+        │   └── ○ Wipe (new page revealed edge to edge)
+        └── Animation duration: … ms          (default 250)
 ```
 
 Long-press an entry for its description.
@@ -144,9 +164,28 @@ delay make the turn faster; *Fast refresh* (DU waveform) makes each strip cheape
 Kobos in particular, because the driver does not wait for the submission of DU updates, at
 the cost of more ghosting.
 
+### Android and other non-e-ink displays
+
+On Android, every KOReader refresh call, whatever region it names, copies the *whole*
+framebuffer into the app window and posts it. Nothing on the panel "stays" between
+refreshes, so the strip wipe cannot work there: the first strip would post the entire
+new page. The plugin therefore switches engine when the device reports no e-ink screen
+(`Device:hasEinkScreen()`):
+
+* the previous page is snapshotted in the first `beforePaint()` of the turn, the new page
+  after painting;
+* for a fixed duration (default 250 ms, ease-out), every frame composites old and new
+  pages in the framebuffer, as a slide or a wipe, and posts it through the original
+  refresh call;
+* the number of frames follows the speed of the device, the duration does not.
+
+It costs two full-frame copies at the start and one full-window post per frame, which a
+phone handles comfortably. The loop runs synchronously, like the e-ink one, so the UI is
+busy for the duration of the turn. The desktop (SDL) build takes the same path.
+
 ### Full refreshes
 
-The plugin does **not** re-implement KOReader's full-refresh rules. The periodic clearing
+On e-ink, the plugin does **not** re-implement KOReader's full-refresh rules. The periodic clearing
 refresh ("Full refresh rate"), chapter-boundary flashes and image-page flashes all arrive as
 a *flashing* refresh in the repaint queue, so the plugin lets those through unanimated (or
 downgrades them to a partial refresh when *Mild global refresh* is on). Behaviour follows

@@ -26,10 +26,12 @@ local SwipeAnimation = WidgetContainer:extend{
 function SwipeAnimation:init()
     -- PluginLoader runs main.lua even for disabled plugins, so nothing is
     -- hooked at module level: everything happens when a reader instance
-    -- actually creates us.
-    Hook.install()
-    Hook.setActive(true)
-    Menu.applyDefaults()
+    -- actually creates us. On an unsupported display (Android e-ink)
+    -- install() returns nil and the plugin only shows a notice in the menu.
+    if Hook.install() then
+        Hook.setActive(true)
+        Menu.applyDefaults()
+    end
     Menu.registerOrder()
     self.ui.menu:registerToMainMenu(self)
 end

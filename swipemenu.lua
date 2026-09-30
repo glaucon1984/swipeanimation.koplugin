@@ -2,7 +2,9 @@
     swipemenu.lua -- settings menu for the Swipe Animation plugin.
 
     Adds "Swipe animation settings" right after "Page turns" under
-    Settings > Taps and gestures, mirroring the original patch.
+    Settings > Taps and gestures, mirroring the original patch. The entries
+    depend on the display class: strip options on e-ink, frame options on
+    LCD, a notice on unsupported devices.
 ]]
 
 local UIManager = require("ui/uimanager")
@@ -37,6 +39,13 @@ local zh_fallback = {
     ["%1 animation steps: %2"] = "%1动画步数：%2",
     ["%1 animation steps: default %2"] = "%1动画步数：默认 %2",
     ["Kobo MTK: sync panel before animation"] = "Kobo MTK：动画前同步屏幕",
+    ["Animation style"] = "动画样式",
+    ["Slide (new page pushes the old one)"] = "滑动（新页推走旧页）",
+    ["Wipe (new page revealed edge to edge)"] = "擦除（新页从一边逐渐显示）",
+    ["Animation duration"] = "动画时长",
+    ["Animation duration: %1 ms"] = "动画时长：%1 毫秒",
+    ["Animation duration: default %1 ms"] = "动画时长：默认 %1 毫秒",
+    ["Not available on Android e-ink devices"] = "不支持 Android 墨水屏设备",
     [ [[
 Enter the delay between animation frames, in milliseconds.
 0 = no extra pause (pace with strip refresh).
@@ -106,6 +115,13 @@ local pt_BR_fallback = {
     ["%1 animation steps: %2"] = "%1 - passos da animação: %2",
     ["%1 animation steps: default %2"] = "%1 - passos da animação: padrão (%2)",
     ["Kobo MTK: sync panel before animation"] = "Kobo MTK: sincronizar o painel antes da animação",
+    ["Animation style"] = "Estilo da animação",
+    ["Slide (new page pushes the old one)"] = "Deslizar (a nova página empurra a antiga)",
+    ["Wipe (new page revealed edge to edge)"] = "Revelar (a nova página aparece de uma borda à outra)",
+    ["Animation duration"] = "Duração da animação",
+    ["Animation duration: %1 ms"] = "Duração da animação: %1 ms",
+    ["Animation duration: default %1 ms"] = "Duração da animação: padrão (%1 ms)",
+    ["Not available on Android e-ink devices"] = "Não disponível em dispositivos Android com tela e-ink",
     [ [[
 Enter the delay between animation frames, in milliseconds.
 0 = no extra pause (pace with strip refresh).
@@ -181,7 +197,11 @@ local function orientationLabel(landscape)
     return landscape and _("Landscape") or _("Portrait")
 end
 
--- Generic "enter a number for the current orientation" dialog.
+local function refreshMenu(touchmenu_instance)
+    if touchmenu_instance then touchmenu_instance:updateItems() end
+end
+
+-- Generic "enter a number" dialog.
 -- opts: title, description (already formatted), current, min, save(value|nil)
 local function showNumberDialog(opts, touchmenu_instance)
     local InputDialog = require("ui/widget/inputdialog")
@@ -204,7 +224,7 @@ local function showNumberDialog(opts, touchmenu_instance)
                     text = _("Restore default"),
                     callback = function()
                         opts.save(nil)
-                        if touchmenu_instance then touchmenu_instance:updateItems() end
+                        refreshMenu(touchmenu_instance)
                         UIManager:close(input_dialog)
                     end,
                 },
@@ -218,7 +238,7 @@ local function showNumberDialog(opts, touchmenu_instance)
                         else
                             opts.save(math.floor(value))
                         end
-                        if touchmenu_instance then touchmenu_instance:updateItems() end
+                        refreshMenu(touchmenu_instance)
                         UIManager:close(input_dialog)
                     end,
                 },
@@ -262,6 +282,185 @@ Current orientation: %3
 Current default: %4]]), Hook.MIN_STEPS, Hook.MAX_STEPS, orientationLabel(landscape), default_steps),
         save = function(value) Hook.setConfiguredSteps(landscape, value) end,
     }, touchmenu_instance)
+end
+
+local function showDurationDialog(Hook, touchmenu_instance)
+    showNumberDialog({
+        title = _("Animation duration"),
+        current = Hook.getLCDDurationMs(),
+        min = Hook.MIN_LCD_DURATION_MS,
+        description = T(_([[
+Enter how long a page turn animation lasts, in milliseconds (%1 to %2).
+The number of frames follows the speed of the device.
+
+Current default: %3 ms]]), Hook.MIN_LCD_DURATION_MS, Hook.MAX_LCD_DURATION_MS, Hook.defaults.lcd_duration_ms),
+        save = function(value) Hook.setConfiguredLCDDurationMs(value) end,
+    }, touchmenu_instance)
+end
+
+-- ==================== items ====================
+
+-- Same setting as Page turns > Page turn animations.
+local function toggleItem()
+    return {
+        text = _("Page turn animations"),
+        checked_func = isAnimationEnabled,
+        callback = function(touchmenu_instance)
+            G_reader_settings:flipNilOrFalse("swipe_animations")
+            refreshMenu(touchmenu_instance)
+        end,
+        separator = true,
+    }
+end
+
+local function radioItem(text, checked_func, callback)
+    return {
+        text = text,
+        radio = true,
+        checked_func = checked_func,
+        callback = function(touchmenu_instance)
+            callback()
+            refreshMenu(touchmenu_instance)
+        end,
+    }
+end
+
+local function buildEinkItems(Hook)
+    return {
+        toggleItem(),
+        {
+            text = _("Swipe animation refresh mode"),
+            enabled_func = isAnimationEnabled,
+            help_text = _([[
+Choose the refresh type used for each strip of the software swipe animation.
+
+• UI refresh (default): balanced quality and speed, suitable for most cases.
+• Fast refresh: fastest, best for smoothness when some ghosting is acceptable.
+
+Changes take effect immediately.]]),
+            sub_item_table = {
+                radioItem(_("UI refresh (default, recommended)"),
+                    function() return Hook.getRefreshMode() == "ui" end,
+                    function() Hook.setRefreshMode("ui") end),
+                radioItem(_("Fast refresh (fastest, more ghosting)"),
+                    function() return Hook.getRefreshMode() == "fast" end,
+                    function() Hook.setRefreshMode("fast") end),
+            },
+        },
+        {
+            text_func = function()
+                local landscape = Hook.isLandscape()
+                local configured = Hook.getConfiguredDelayMs(landscape)
+                if configured then
+                    return T(_("%1 animation frame delay: %2 ms"), orientationLabel(landscape), configured)
+                end
+                return T(_("%1 animation frame delay: default %2 ms"),
+                    orientationLabel(landscape), Hook.getDefaultDelayMs(landscape))
+            end,
+            enabled_func = isAnimationEnabled,
+            keep_menu_open = true,
+            callback = function(touchmenu_instance)
+                showDelayDialog(Hook, touchmenu_instance)
+            end,
+            help_text = _([[
+Adjust the pause between animation frames.
+
+Enter a value in milliseconds. Portrait and landscape remember their own values.
+When unset, the default for the current orientation is shown.]]),
+        },
+        {
+            text_func = function()
+                local landscape = Hook.isLandscape()
+                local configured = Hook.getConfiguredSteps(landscape)
+                if configured then
+                    return T(_("%1 animation steps: %2"), orientationLabel(landscape), configured)
+                end
+                return T(_("%1 animation steps: default %2"),
+                    orientationLabel(landscape), Hook.getDefaultSteps(landscape))
+            end,
+            enabled_func = isAnimationEnabled,
+            keep_menu_open = true,
+            callback = function(touchmenu_instance)
+                showStepsDialog(Hook, touchmenu_instance)
+            end,
+            help_text = _([[
+Number of vertical strips the new page is revealed in.
+
+Fewer strips make the turn faster, more strips make the sweep smoother. Portrait and landscape remember their own values.]]),
+        },
+        {
+            text = _("Mild global refresh"),
+            enabled_func = isAnimationEnabled,
+            checked_func = Hook.isMildGlobalRefresh,
+            callback = function(touchmenu_instance)
+                Hook.setMildGlobalRefresh(not Hook.isMildGlobalRefresh())
+                refreshMenu(touchmenu_instance)
+            end,
+            help_text = _([[
+• Checked: use partial refresh (for text-only content)
+
+• Unchecked: use full refresh (for content with images)]]),
+        },
+        Hook.isKoboMTK() and {
+            text = _("Kobo MTK: sync panel before animation"),
+            enabled_func = isAnimationEnabled,
+            checked_func = Hook.isMTKFenceEnabled,
+            callback = function(touchmenu_instance)
+                Hook.setMTKFenceEnabled(not Hook.isMTKFenceEnabled())
+                refreshMenu(touchmenu_instance)
+            end,
+            help_text = _([[
+Before the strips start, wait for the previous screen update and send one no-change full-screen update, so the first strip is not delayed by the display controller.
+
+Inherited from the original patch. Try turning it off: page turns start sooner if your device does not need it.]]),
+        } or nil, -- must be the last item
+    }
+end
+
+local function buildLCDItems(Hook)
+    return {
+        toggleItem(),
+        {
+            text = _("Animation style"),
+            enabled_func = isAnimationEnabled,
+            help_text = _([[
+• Slide: the new page pushes the old one out of the screen.
+• Wipe: the new page is uncovered from one edge to the other, like the e-ink version.]]),
+            sub_item_table = {
+                radioItem(_("Slide (new page pushes the old one)"),
+                    function() return Hook.getLCDStyle() == "slide" end,
+                    function() Hook.setLCDStyle("slide") end),
+                radioItem(_("Wipe (new page revealed edge to edge)"),
+                    function() return Hook.getLCDStyle() == "wipe" end,
+                    function() Hook.setLCDStyle("wipe") end),
+            },
+        },
+        {
+            text_func = function()
+                local configured = Hook.getConfiguredLCDDurationMs()
+                if configured then
+                    return T(_("Animation duration: %1 ms"), configured)
+                end
+                return T(_("Animation duration: default %1 ms"), Hook.defaults.lcd_duration_ms)
+            end,
+            enabled_func = isAnimationEnabled,
+            keep_menu_open = true,
+            callback = function(touchmenu_instance)
+                showDurationDialog(Hook, touchmenu_instance)
+            end,
+            help_text = _([[
+How long a page turn takes. The animation renders as many frames as the device manages in that time.]]),
+        },
+    }
+end
+
+local function buildInertItems()
+    return {
+        {
+            text = _("Not available on Android e-ink devices"),
+            enabled = false,
+        },
+    }
 end
 
 -- ==================== public API ====================
@@ -315,6 +514,15 @@ function Menu.key()
 end
 
 function Menu.build(Hook)
+    local class = Hook.displayClass()
+    local items
+    if class == "eink" then
+        items = buildEinkItems(Hook)
+    elseif class == "lcd" then
+        items = buildLCDItems(Hook)
+    else
+        items = buildInertItems()
+    end
     return {
         text = _("Swipe animation settings"),
         -- Fallback placement if reader_menu_order could not be edited.
@@ -323,116 +531,7 @@ function Menu.build(Hook)
 Adjust the speed (frame delay) and refresh mode (UI / Fast) of the software swipe animation.
 
 The refresh mode directly affects the quality and ghosting of each strip update during the animation.]]),
-        sub_item_table = {
-            {
-                -- Same setting as Page turns > Page turn animations.
-                text = _("Page turn animations"),
-                checked_func = isAnimationEnabled,
-                callback = function(touchmenu_instance)
-                    G_reader_settings:flipNilOrFalse("swipe_animations")
-                    if touchmenu_instance then touchmenu_instance:updateItems() end
-                end,
-                separator = true,
-            },
-            {
-                text = _("Swipe animation refresh mode"),
-                enabled_func = isAnimationEnabled,
-                help_text = _([[
-Choose the refresh type used for each strip of the software swipe animation.
-
-• UI refresh (default): balanced quality and speed, suitable for most cases.
-• Fast refresh: fastest, best for smoothness when some ghosting is acceptable.
-
-Changes take effect immediately.]]),
-                sub_item_table = {
-                    {
-                        text = _("UI refresh (default, recommended)"),
-                        radio = true,
-                        checked_func = function() return Hook.getRefreshMode() == "ui" end,
-                        callback = function(touchmenu_instance)
-                            Hook.setRefreshMode("ui")
-                            if touchmenu_instance then touchmenu_instance:updateItems() end
-                        end,
-                    },
-                    {
-                        text = _("Fast refresh (fastest, more ghosting)"),
-                        radio = true,
-                        checked_func = function() return Hook.getRefreshMode() == "fast" end,
-                        callback = function(touchmenu_instance)
-                            Hook.setRefreshMode("fast")
-                            if touchmenu_instance then touchmenu_instance:updateItems() end
-                        end,
-                    },
-                },
-            },
-            {
-                text_func = function()
-                    local landscape = Hook.isLandscape()
-                    local configured = Hook.getConfiguredDelayMs(landscape)
-                    if configured then
-                        return T(_("%1 animation frame delay: %2 ms"), orientationLabel(landscape), configured)
-                    end
-                    return T(_("%1 animation frame delay: default %2 ms"),
-                        orientationLabel(landscape), Hook.getDefaultDelayMs(landscape))
-                end,
-                enabled_func = isAnimationEnabled,
-                keep_menu_open = true,
-                callback = function(touchmenu_instance)
-                    showDelayDialog(Hook, touchmenu_instance)
-                end,
-                help_text = _([[
-Adjust the pause between animation frames.
-
-Enter a value in milliseconds. Portrait and landscape remember their own values.
-When unset, the default for the current orientation is shown.]]),
-            },
-            {
-                text_func = function()
-                    local landscape = Hook.isLandscape()
-                    local configured = Hook.getConfiguredSteps(landscape)
-                    if configured then
-                        return T(_("%1 animation steps: %2"), orientationLabel(landscape), configured)
-                    end
-                    return T(_("%1 animation steps: default %2"),
-                        orientationLabel(landscape), Hook.getDefaultSteps(landscape))
-                end,
-                enabled_func = isAnimationEnabled,
-                keep_menu_open = true,
-                callback = function(touchmenu_instance)
-                    showStepsDialog(Hook, touchmenu_instance)
-                end,
-                help_text = _([[
-Number of vertical strips the new page is revealed in.
-
-Fewer strips make the turn faster, more strips make the sweep smoother. Portrait and landscape remember their own values.]]),
-            },
-            {
-                text = _("Mild global refresh"),
-                enabled_func = isAnimationEnabled,
-                checked_func = Hook.isMildGlobalRefresh,
-                callback = function(touchmenu_instance)
-                    Hook.setMildGlobalRefresh(not Hook.isMildGlobalRefresh())
-                    if touchmenu_instance then touchmenu_instance:updateItems() end
-                end,
-                help_text = _([[
-• Checked: use partial refresh (for text-only content)
-
-• Unchecked: use full refresh (for content with images)]]),
-            },
-            Hook.isKoboMTK() and {
-                text = _("Kobo MTK: sync panel before animation"),
-                enabled_func = isAnimationEnabled,
-                checked_func = Hook.isMTKFenceEnabled,
-                callback = function(touchmenu_instance)
-                    Hook.setMTKFenceEnabled(not Hook.isMTKFenceEnabled())
-                    if touchmenu_instance then touchmenu_instance:updateItems() end
-                end,
-                help_text = _([[
-Before the strips start, wait for the previous screen update and send one no-change full-screen update, so the first strip is not delayed by the display controller.
-
-Inherited from the original patch. Try turning it off: page turns start sooner if your device does not need it.]]),
-            } or nil, -- must be the last item
-        },
+        sub_item_table = items,
     }
 end
 
