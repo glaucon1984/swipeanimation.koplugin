@@ -217,16 +217,17 @@ end
 
 -- Kobo MTK only: drain the HWTCON queue with a no-change full-screen AUTO
 -- update before the strips start, so the first strip is not slower than
--- the rest. On by default (inherited from the original patch).
+-- the rest. Legacy option inherited from the original patch (always on
+-- there); off by default since 5.1.1.
 function Hook.isMTKFenceEnabled()
-    return G_reader_settings:nilOrTrue("swipe_animation_mtk_fence")
+    return G_reader_settings:isTrue("swipe_animation_mtk_fence")
 end
 
 function Hook.setMTKFenceEnabled(enabled)
     if enabled then
-        G_reader_settings:delSetting("swipe_animation_mtk_fence")
+        G_reader_settings:saveSetting("swipe_animation_mtk_fence", true)
     else
-        G_reader_settings:saveSetting("swipe_animation_mtk_fence", false)
+        G_reader_settings:delSetting("swipe_animation_mtk_fence")
     end
 end
 

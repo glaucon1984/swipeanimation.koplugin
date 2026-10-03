@@ -20,7 +20,7 @@ existing settings carry over. What changed:
 | Uninstall | Delete the patches and restore the original `uimanager.lua` from a backup | Delete the folder |
 | KOReader updates | The bundled `uimanager.lua` has to be re-merged on every KOReader release | Nothing to do |
 | Framebuffer work per turn | Four full-frame copies/blits (eight on colour devices) and two large allocations | None |
-| Kobo MTK pre-animation sync | Always on | Switchable in the menu |
+| Kobo MTK pre-animation sync | Always on | Off by default, switchable in the menu |
 | Full-refresh rules (clearing, chapters, images) | Re-implemented inside the patch | KOReader's own rules and settings apply |
 | Strip count | Fixed (8 portrait / 6 landscape) | Configurable per orientation |
 | Android phones / tablets | Not supported (strips, "performance not satisfactory") | Supported since 5.1.0 with a separate frame-based engine (slide or wipe) |
@@ -36,8 +36,8 @@ existing settings carry over. What changed:
 * Separate frame delay (ms) and strip count for portrait and landscape; delay `0` means no
   extra pause
 * **Mild global refresh**: replace the periodic full (flashing) refresh by a partial one
-* Kobo MTK (Clara BW / Colour, Libra Colour, …) refresh fence (switchable) and
-  driver-aligned strips
+* Kobo MTK (Clara BW / Colour, Libra Colour, …) driver-aligned strips and an optional
+  legacy refresh fence (off by default)
 * English, Chinese and Brazilian Portuguese menu strings
 
 ## Requirements and tested devices
@@ -96,7 +96,7 @@ Settings (⚙)
         ├── Portrait / Landscape animation frame delay: … ms
         ├── Portrait / Landscape animation steps: …
         ├── ☑ Mild global refresh
-        └── ☑ Kobo MTK: sync panel before animation   (Kobo MTK devices only)
+        └── ☐ Kobo MTK: sync panel before animation   (Kobo MTK devices only, legacy)
 ```
 
 On Android phones and tablets (and the desktop build) the submenu is:
@@ -155,9 +155,10 @@ blitted each strip.)
 On Kobo MTK devices the original always issued a "fence" before the strips: wait for the
 previous update, send one no-change full-screen AUTO update, wait for it. The plugin does
 the same from the first `beforePaint()` of the turn, while the framebuffer still holds the
-previous page, so it needs no snapshot either. It is a switch (*Kobo MTK: sync panel before
-animation*, on by default); if page turns look just as even with it off, leave it off and
-the first strip starts sooner.
+previous page, so it needs no snapshot either. Since 5.1.1 it is a legacy option (*Kobo MTK:
+sync panel before animation*, off by default): a week of reading on a Clara BW showed no
+difference without it, and the first strip starts sooner. Turn it on only if your panel
+paces the strips unevenly, with a first strip visibly slower than the rest.
 
 The remaining knobs are the strip count and the frame delay. Fewer strips or a shorter
 delay make the turn faster; *Fast refresh* (DU waveform) makes each strip cheaper on MTK

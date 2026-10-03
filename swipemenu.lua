@@ -412,7 +412,7 @@ Fewer strips make the turn faster, more strips make the sweep smoother. Portrait
             help_text = _([[
 Before the strips start, wait for the previous screen update and send one no-change full-screen update, so the first strip is not delayed by the display controller.
 
-Inherited from the original patch. Try turning it off: page turns start sooner if your device does not need it.]]),
+Legacy option inherited from the original patch, off by default. Turn it on only if the first strip of a page turn is visibly slower than the rest on your panel; page turns start a little later with it on.]]),
         } or nil, -- must be the last item
     }
 end
