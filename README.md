@@ -28,7 +28,8 @@ existing settings carry over. What changed:
 ## Features
 
 * Smooth strip-based page-turn animation in both directions, portrait and landscape
-* Works on devices without hardware animation support (all Kobo, older Kindles, …)
+* Works on devices without hardware animation support (all Kobo, PocketBook, older
+  Kindles, …)
 * Android phones and tablets: time-based **slide** (default) or **wipe** with adjustable
   duration; frame count follows the speed of the device
 * Also animates fixed-layout documents (PDF, DjVu, CBZ, …)
@@ -44,10 +45,15 @@ existing settings carry over. What changed:
 
 * KOReader **2026.07.1 or later** (the release that introduced the page-turn animation
   plumbing in `ReaderView`).
-* **Tested on a Kobo Clara BW** (e-ink engine) and on an **Android phone** (frame engine).
-  The e-ink code paths for other Kobo models, Kindles and other Linux e-ink devices are
-  the same as in the original patch set, which was tested widely, but they have not been
-  exercised with this plugin yet. Reports welcome.
+* **Tested on a Kobo Clara BW** and a **PocketBook Era Lite** (e-ink engine) and on an
+  **Android phone** (frame engine). The e-ink code paths for other Kobo and PocketBook
+  models, Kindles and other Linux e-ink devices are the same as in the original patch set,
+  which was tested widely, but they have not been exercised with this plugin yet. Reports
+  welcome.
+* **PocketBook**: nothing device-specific is needed. KOReader drives the screen through
+  InkView, where the *UI* and *Partial* strip refreshes both become `PartialUpdate` and
+  *Fast* becomes `DynamicUpdate` (the A2 waveform), so the two refresh modes behave as
+  on other readers. The Kobo MTK options do not apply and are hidden.
 * **Android devices with an e-ink screen** (Onyx and similar) are not supported: their
   screen updates go through the Android display stack, which the plugin cannot control.
   The plugin stays inert there and only shows a notice in its menu.
@@ -58,7 +64,8 @@ existing settings carry over. What changed:
    [latest release](https://github.com/glaucon1984/swipeanimation.koplugin/releases/latest)
    and unzip it. You get a folder named `swipeanimation.koplugin`.
 2. Copy that folder into `koreader/plugins/` on the device (for example
-   `.adds/koreader/plugins/` on Kobo, `koreader/plugins/` on Kindle).
+   `.adds/koreader/plugins/` on Kobo, `applications/koreader/plugins/` on PocketBook,
+   `koreader/plugins/` on Kindle).
 3. Restart KOReader.
 4. Open a book. The animation is enabled by default the first time the plugin runs. It can
    be toggled under **Settings (⚙) → Taps and gestures → Page turns → Page turn
