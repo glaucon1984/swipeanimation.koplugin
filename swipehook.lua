@@ -50,6 +50,14 @@
     optionally downgraded to a plain partial refresh by the "Mild global
     refresh" option. On LCD there is no flash to preserve, so every
     page-turn refresh animates.
+    Pacing (e-ink only): the panel controller executes partial updates
+    asynchronously, a wipe queues one per strip, and a page painted into
+    the framebuffer while earlier strips are still pending is read half
+    old, half new (strips of two pages mixed on the panel). No wait helps
+    on PocketBook, where WaitForUpdateComplete() returns at once, so page
+    turns are paced by time instead: a minimum gap since the last refresh,
+    slept out before the new page is painted, and a cap on how many quick
+    turns in a row still get a wipe (see paceTurn()).
 ]]
 
 local Device = require("device")
@@ -66,11 +74,19 @@ local Hook = {
         steps = { landscape = 6, portrait = 8 },
         lcd_duration_ms = 250,
         lcd_style = "slide",
+        -- Pacing (see the header): PocketBook needs it, the Kobo Clara BW
+        -- has not shown the tearing, so other devices default to off.
+        min_gap_ms = { pocketbook = 450, other = 0 },
+        burst_wipes = { pocketbook = 3, other = 0 }, -- 0 = no limit
     },
     MIN_STEPS = 2,
     MAX_STEPS = 32,
     MIN_LCD_DURATION_MS = 50,
     MAX_LCD_DURATION_MS = 2000,
+    MAX_MIN_GAP_MS = 2000,
+    MAX_BURST_WIPES = 100,
+    -- Turns closer than this to the previous refresh count as a burst.
+    BURST_WINDOW_MS = 700,
 }
 
 local IMP_METHODS = {
@@ -231,6 +247,58 @@ function Hook.setMTKFenceEnabled(enabled)
     end
 end
 
+-- Pacing settings (e-ink). Unset means the device default; a negative
+-- value counts as unset.
+function Hook.isPocketBook()
+    return (Device.isPocketBook and Device:isPocketBook()) and true or false
+end
+
+function Hook.getDefaultMinGapMs()
+    return Hook.isPocketBook() and Hook.defaults.min_gap_ms.pocketbook or Hook.defaults.min_gap_ms.other
+end
+
+-- 0 is a valid value: no gap.
+function Hook.getConfiguredMinGapMs()
+    local ms = tonumber(G_reader_settings:readSetting("swipe_animation_min_gap_ms"))
+    if ms == nil or ms < 0 then return nil end
+    return math.min(math.floor(ms), Hook.MAX_MIN_GAP_MS)
+end
+
+function Hook.setConfiguredMinGapMs(ms)
+    if ms == nil or ms < 0 then
+        G_reader_settings:delSetting("swipe_animation_min_gap_ms")
+    else
+        G_reader_settings:saveSetting("swipe_animation_min_gap_ms", math.min(math.floor(ms), Hook.MAX_MIN_GAP_MS))
+    end
+end
+
+function Hook.getMinGapMs()
+    return Hook.getConfiguredMinGapMs() or Hook.getDefaultMinGapMs()
+end
+
+function Hook.getDefaultBurstWipes()
+    return Hook.isPocketBook() and Hook.defaults.burst_wipes.pocketbook or Hook.defaults.burst_wipes.other
+end
+
+-- 0 is a valid value: no limit.
+function Hook.getConfiguredBurstWipes()
+    local n = tonumber(G_reader_settings:readSetting("swipe_animation_burst_wipes"))
+    if n == nil or n < 0 then return nil end
+    return math.min(math.floor(n), Hook.MAX_BURST_WIPES)
+end
+
+function Hook.setConfiguredBurstWipes(n)
+    if n == nil or n < 0 then
+        G_reader_settings:delSetting("swipe_animation_burst_wipes")
+    else
+        G_reader_settings:saveSetting("swipe_animation_burst_wipes", math.min(math.floor(n), Hook.MAX_BURST_WIPES))
+    end
+end
+
+function Hook.getBurstWipes()
+    return Hook.getConfiguredBurstWipes() or Hook.getDefaultBurstWipes()
+end
+
 -- LCD engine settings.
 function Hook.getLCDStyle()
     local style = G_reader_settings:readSetting("swipe_animation_lcd_style")
@@ -279,6 +347,47 @@ do
     end
 end
 Hook._clock_ms = clock_ms -- tests replace this
+
+-- ==================== pacing (e-ink) ====================
+
+-- Remember when the last update was handed to the panel.
+local function stamp(state)
+    state.last_update_ms = Hook._clock_ms()
+end
+
+-- Hand a refresh to an original implementation and stamp it.
+local function passThrough(state, fn, screen, x, y, w, h, dither)
+    local result = fn(screen, x, y, w, h, dither)
+    stamp(state)
+    return result
+end
+
+-- Called from the first beforePaint of a page-turn repaint, before the new
+-- page is painted. Same two rules as the Kobalt port's PbInkScreen:
+--   * burst: turns closer than BURST_WINDOW_MS to the previous refresh are
+--     counted; from the burst_wipes-th one on the wipe is dropped and the
+--     turn is shown with the plain refresh, until the turns slow down;
+--   * gap: the next page is not painted until min_gap_ms have passed since
+--     the last refresh, so the controller has finished reading the old one.
+local function paceTurn(state)
+    local now = Hook._clock_ms()
+    local since = state.last_update_ms and (now - state.last_update_ms) or math.huge
+
+    if since < Hook.BURST_WINDOW_MS then
+        state.quick_turns = state.quick_turns + 1
+    else
+        state.quick_turns = 0
+    end
+    local burst = Hook.getBurstWipes()
+    state.skip_wipe = burst > 0 and state.quick_turns >= burst
+
+    local gap = Hook.getMinGapMs()
+    if since < gap then
+        local wait = gap - since
+        logger.dbg("SwipeAnimation: pacing the page turn by", wait, "ms")
+        ffiUtil.usleep(math.floor(wait * 1000 + 0.5))
+    end
+end
 
 -- ==================== e-ink engine: strip wipe ====================
 
@@ -455,7 +564,7 @@ local function interceptRefreshImp(state, name, original)
             return
         end
         if not state.armed then
-            return original(screen, x, y, w, h, dither)
+            return passThrough(state, original, screen, x, y, w, h, dither)
         end
 
         state.armed = false
@@ -471,10 +580,17 @@ local function interceptRefreshImp(state, name, original)
             -- boundary, image page): no animation, honour it.
             if Hook.isMildGlobalRefresh() and state.originals.refreshPartialImp then
                 logger.dbg("SwipeAnimation: mild global refresh instead of", name)
-                return state.originals.refreshPartialImp(screen, x, y, w, h, dither)
+                return passThrough(state, state.originals.refreshPartialImp, screen, x, y, w, h, dither)
             end
             logger.dbg("SwipeAnimation: flashing refresh, skipping animation:", name)
-            return original(screen, x, y, w, h, dither)
+            return passThrough(state, original, screen, x, y, w, h, dither)
+        end
+
+        if not lcd and state.skip_wipe then
+            -- Too many quick turns in a row for the panel controller
+            -- (see paceTurn): plain refresh until the turns slow down.
+            logger.dbg("SwipeAnimation: quick succession, plain refresh instead of a wipe")
+            return passThrough(state, original, screen, x, y, w, h, dither)
         end
 
         local sw, sh = screen.bb:getWidth(), screen.bb:getHeight()
@@ -482,7 +598,7 @@ local function interceptRefreshImp(state, name, original)
         w, h = w or sw, h or sh
         if w * h < MIN_AREA_RATIO * sw * sh or (lcd and not old_bb) then
             freeBuffer(old_bb)
-            return original(screen, x, y, w, h, dither)
+            return passThrough(state, original, screen, x, y, w, h, dither)
         end
 
         local ok, err
@@ -503,10 +619,12 @@ local function interceptRefreshImp(state, name, original)
             end
             freeBuffer(old_bb)
             freeBuffer(new_bb)
-            return original(screen, x, y, w, h, dither)
+            return passThrough(state, original, screen, x, y, w, h, dither)
         end
         freeBuffer(old_bb)
         freeBuffer(new_bb)
+        -- The last strip (or frame) is the last update handed to the panel.
+        stamp(state)
         state.suppress = true
     end
 end
@@ -527,6 +645,7 @@ local function installScreenHooks(state)
                         freeBuffer(state.old_bb)
                         state.old_bb = screen.bb:copy()
                     else
+                        paceTurn(state)
                         runMTKFence(state, screen)
                     end
                 end
@@ -635,6 +754,9 @@ function Hook.install()
         old_bb = nil,     -- LCD only: snapshot of the previous page
         originals = {},
         last_frame_count = nil,
+        last_update_ms = nil, -- e-ink: when the last refresh was issued (Hook._clock_ms)
+        quick_turns = 0,      -- e-ink: consecutive page turns within BURST_WINDOW_MS
+        skip_wipe = false,    -- e-ink: this turn is past the burst, plain refresh
     }
     Screen._swipeanimation_state = state
 
@@ -652,6 +774,8 @@ function Hook.setActive(active)
     if not state.active then
         state.pending = false
         state.armed = false
+        state.quick_turns = 0
+        state.skip_wipe = false
         freeBuffer(state.old_bb)
         state.old_bb = nil
     end

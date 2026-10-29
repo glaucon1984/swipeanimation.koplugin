@@ -39,6 +39,9 @@ existing settings carry over. What changed:
 * **Mild global refresh**: replace the periodic full (flashing) refresh by a partial one
 * Kobo MTK (Clara BW / Colour, Libra Colour, …) driver-aligned strips and an optional
   legacy refresh fence (off by default)
+* **Pacing for quick page turns** on panels whose controller executes updates
+  asynchronously (PocketBook): a minimum gap between turns and a cap on animated turns in
+  a row, both adjustable; on by default on PocketBook, off elsewhere
 * English, Chinese and Brazilian Portuguese menu strings
 
 ## Requirements and tested devices
@@ -50,10 +53,11 @@ existing settings carry over. What changed:
   models, Kindles and other Linux e-ink devices are the same as in the original patch set,
   which was tested widely, but they have not been exercised with this plugin yet. Reports
   welcome.
-* **PocketBook**: nothing device-specific is needed. KOReader drives the screen through
-  InkView, where the *UI* and *Partial* strip refreshes both become `PartialUpdate` and
-  *Fast* becomes `DynamicUpdate` (the A2 waveform), so the two refresh modes behave as
-  on other readers. The Kobo MTK options do not apply and are hidden.
+* **PocketBook**: KOReader drives the screen through InkView, where the *UI* and *Partial*
+  strip refreshes both become `PartialUpdate` and *Fast* becomes `DynamicUpdate` (the A2
+  waveform), so the two refresh modes behave as on other readers. The Kobo MTK options do
+  not apply and are hidden. Quick page turns are paced by default there, see
+  *Quick page turns* below.
 * **Android devices with an e-ink screen** (Onyx and similar) are not supported: their
   screen updates go through the Android display stack, which the plugin cannot control.
   The plugin stays inert there and only shows a notice in its menu.
@@ -102,6 +106,8 @@ Settings (⚙)
         │   └── ○ Fast refresh (fastest, more ghosting)
         ├── Portrait / Landscape animation frame delay: … ms
         ├── Portrait / Landscape animation steps: …
+        ├── Minimum gap between page turns: … ms      (default 450 on PocketBook, 0 elsewhere)
+        ├── Animated turns in a row: …                (default 3 on PocketBook, no limit elsewhere)
         ├── ☑ Mild global refresh
         └── ☐ Kobo MTK: sync panel before animation   (Kobo MTK devices only, legacy)
 ```
@@ -171,6 +177,32 @@ The remaining knobs are the strip count and the frame delay. Fewer strips or a s
 delay make the turn faster; *Fast refresh* (DU waveform) makes each strip cheaper on MTK
 Kobos in particular, because the driver does not wait for the submission of DU updates, at
 the cost of more ghosting.
+
+### Quick page turns (pacing)
+
+The panel controller executes partial updates asynchronously: a wipe queues one update per
+strip, and each takes the controller a few hundred milliseconds. If the next page is painted
+into the framebuffer while earlier strips are still pending, the controller reads a mix of
+the old and the new page and shows strips of both. On a PocketBook Era Lite this appeared
+from the fourth quick turn (about one turn every half second); the first three were fine,
+because the controller absorbs a few wipes before its queue falls behind. Waiting does not
+help there: InkView's `WaitForUpdateComplete()` returns at once, and KOReader's
+`refreshWaitForLast()` is a no-op on PocketBook.
+
+So page turns are paced by time, with the two rules that fixed the same tearing in the
+Kobalt port's screen plugin:
+
+* **Minimum gap between page turns** (default 450 ms on PocketBook, 0 elsewhere), measured
+  from the last screen update, strip or plain refresh. A turn that comes sooner sleeps out
+  the remainder *before* the new page is painted; with the ~200 ms the strips take, animated
+  turns end up at least ~650 ms apart.
+* **Animated turns in a row** (default 3 on PocketBook, no limit elsewhere). Turns less than
+  0.7 s apart form a burst; from the fourth one on the wipe is dropped and the page is shown
+  with a plain refresh, until the turns slow down again.
+
+Both are in the settings menu. The tearing has not been seen on the Kobo Clara BW (the MTK
+driver waits for the submission of each update), so other devices default to off; if a
+quick burst of turns tears on yours, try 450 ms and 3.
 
 ### Android and other non-e-ink displays
 

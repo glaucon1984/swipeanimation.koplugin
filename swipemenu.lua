@@ -39,6 +39,13 @@ local zh_fallback = {
     ["%1 animation steps: %2"] = "%1动画步数：%2",
     ["%1 animation steps: default %2"] = "%1动画步数：默认 %2",
     ["Kobo MTK: sync panel before animation"] = "Kobo MTK：动画前同步屏幕",
+    ["Minimum gap between page turns"] = "翻页最小间隔",
+    ["Minimum gap between page turns: %1 ms"] = "翻页最小间隔：%1 毫秒",
+    ["Minimum gap between page turns: default %1 ms"] = "翻页最小间隔：默认 %1 毫秒",
+    ["Animated turns in a row"] = "连续动画翻页次数",
+    ["Animated turns in a row: %1"] = "连续动画翻页次数：%1",
+    ["Animated turns in a row: default %1"] = "连续动画翻页次数：默认 %1",
+    ["no limit"] = "不限",
     ["Animation style"] = "动画样式",
     ["Slide (new page pushes the old one)"] = "滑动（新页推走旧页）",
     ["Wipe (new page revealed edge to edge)"] = "擦除（新页从一边逐渐显示）",
@@ -115,6 +122,13 @@ local pt_BR_fallback = {
     ["%1 animation steps: %2"] = "%1 - passos da animação: %2",
     ["%1 animation steps: default %2"] = "%1 - passos da animação: padrão (%2)",
     ["Kobo MTK: sync panel before animation"] = "Kobo MTK: sincronizar o painel antes da animação",
+    ["Minimum gap between page turns"] = "Intervalo mínimo entre viradas de página",
+    ["Minimum gap between page turns: %1 ms"] = "Intervalo mínimo entre viradas de página: %1 ms",
+    ["Minimum gap between page turns: default %1 ms"] = "Intervalo mínimo entre viradas de página: padrão (%1 ms)",
+    ["Animated turns in a row"] = "Viradas animadas em sequência",
+    ["Animated turns in a row: %1"] = "Viradas animadas em sequência: %1",
+    ["Animated turns in a row: default %1"] = "Viradas animadas em sequência: padrão (%1)",
+    ["no limit"] = "sem limite",
     ["Animation style"] = "Estilo da animação",
     ["Slide (new page pushes the old one)"] = "Deslizar (a nova página empurra a antiga)",
     ["Wipe (new page revealed edge to edge)"] = "Revelar (a nova página aparece de uma borda à outra)",
@@ -301,6 +315,39 @@ end
 -- ==================== items ====================
 
 -- Same setting as Page turns > Page turn animations.
+local function showMinGapDialog(Hook, touchmenu_instance)
+    local default_ms = Hook.getDefaultMinGapMs()
+    showNumberDialog({
+        title = _("Minimum gap between page turns"),
+        current = Hook.getConfiguredMinGapMs() or default_ms,
+        min = 0,
+        description = T(_([[
+Enter the minimum time between the last screen update and the next page turn, in milliseconds (0 to %1). A turn that comes sooner waits for the remainder before the new page is drawn.
+
+0 disables the gap. Current default: %2 ms]]), Hook.MAX_MIN_GAP_MS, default_ms),
+        save = function(value) Hook.setConfiguredMinGapMs(value) end,
+    }, touchmenu_instance)
+end
+
+local function showBurstDialog(Hook, touchmenu_instance)
+    local default_n = Hook.getDefaultBurstWipes()
+    showNumberDialog({
+        title = _("Animated turns in a row"),
+        current = Hook.getConfiguredBurstWipes() or default_n,
+        min = 0,
+        description = T(_([[
+Enter how many page turns in quick succession (less than %1 ms apart) are animated before the following ones use a plain refresh. After a short pause the next turn animates again.
+
+0 means no limit. Current default: %2]]), Hook.BURST_WINDOW_MS, default_n),
+        save = function(value) Hook.setConfiguredBurstWipes(value) end,
+    }, touchmenu_instance)
+end
+
+local function burstLabel(n)
+    if n == 0 then return _("no limit") end
+    return n
+end
+
 local function toggleItem()
     return {
         text = _("Page turn animations"),
@@ -387,6 +434,42 @@ When unset, the default for the current orientation is shown.]]),
 Number of vertical strips the new page is revealed in.
 
 Fewer strips make the turn faster, more strips make the sweep smoother. Portrait and landscape remember their own values.]]),
+        },
+        {
+            text_func = function()
+                local configured = Hook.getConfiguredMinGapMs()
+                if configured then
+                    return T(_("Minimum gap between page turns: %1 ms"), configured)
+                end
+                return T(_("Minimum gap between page turns: default %1 ms"), Hook.getDefaultMinGapMs())
+            end,
+            enabled_func = isAnimationEnabled,
+            keep_menu_open = true,
+            callback = function(touchmenu_instance)
+                showMinGapDialog(Hook, touchmenu_instance)
+            end,
+            help_text = _([[
+Pages turned quickly can show strips of two pages mixed on the panel: the display controller is still executing the previous strips when the next page is drawn. A minimum gap since the last screen update gives it time to finish; a turn that comes sooner waits for the remainder.
+
+Default: 450 ms on PocketBook, 0 (off) on other devices.]]),
+        },
+        {
+            text_func = function()
+                local configured = Hook.getConfiguredBurstWipes()
+                if configured then
+                    return T(_("Animated turns in a row: %1"), burstLabel(configured))
+                end
+                return T(_("Animated turns in a row: default %1"), burstLabel(Hook.getDefaultBurstWipes()))
+            end,
+            enabled_func = isAnimationEnabled,
+            keep_menu_open = true,
+            callback = function(touchmenu_instance)
+                showBurstDialog(Hook, touchmenu_instance)
+            end,
+            help_text = _([[
+When pages are turned in quick succession (less than 0.7 s apart), only the first few turns are animated; the following ones use a plain refresh until the turns slow down. The display controller absorbs a few wipes before its queue falls behind and strips of two pages appear.
+
+Default: 3 on PocketBook, no limit on other devices.]]),
         },
         {
             text = _("Mild global refresh"),
