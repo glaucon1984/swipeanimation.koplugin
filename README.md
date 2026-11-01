@@ -33,7 +33,8 @@ existing settings carry over. What changed:
 * Android phones and tablets: time-based **slide** (default) or **wipe** with adjustable
   duration; frame count follows the speed of the device
 * Also animates fixed-layout documents (PDF, DjVu, CBZ, …)
-* Strip refresh mode: **UI** (default) or **Fast** (quicker, more ghosting)
+* Strip refresh mode: **UI** (default) or **Fast** (quicker, more ghosting; the default on
+  PocketBook)
 * Separate frame delay (ms) and strip count for portrait and landscape; delay `0` means no
   extra pause
 * **Mild global refresh**: replace the periodic full (flashing) refresh by a partial one
@@ -45,7 +46,7 @@ existing settings carry over. What changed:
 * **Pacing for quick page turns** on panels whose controller executes updates
   asynchronously (PocketBook): a minimum gap between turns, a longer gap after a full
   refresh or a change of direction, and a cap on animated turns in a row, all adjustable;
-  on by default on PocketBook, off elsewhere
+  the two gaps are on by default on PocketBook, and all of it is off elsewhere
 * English, Chinese and Brazilian Portuguese menu strings
 
 ## Requirements and tested devices
@@ -60,7 +61,8 @@ existing settings carry over. What changed:
 * **PocketBook**: KOReader drives the screen through InkView, where the *UI* and *Partial*
   strip refreshes both become `PartialUpdate` and *Fast* becomes `DynamicUpdate`. The Kobo
   MTK options do not apply and are hidden. Quick page turns are paced by default there, see
-  *Quick page turns* below, which also lists the values that felt best on the Era Lite.
+  *Quick page turns* below. PocketBook has its own defaults, tuned on the Era Lite: *Fast
+  refresh*, 16 ms frame delay, 8 steps, and the gaps below, in both orientations.
 * **Android devices with an e-ink screen** (Onyx and similar) are not supported: their
   screen updates go through the Android display stack, which the plugin cannot control.
   The plugin stays inert there and only shows a notice in its menu.
@@ -105,13 +107,13 @@ Settings (⚙)
     └── Swipe animation settings
         ├── ☑ Page turn animations        (same setting as above)
         ├── Swipe animation refresh mode
-        │   ├── ○ UI refresh (default, recommended)
-        │   └── ○ Fast refresh (fastest, more ghosting)
+        │   ├── ○ UI refresh (default, recommended; not the default on PocketBook)
+        │   └── ○ Fast refresh (fastest, more ghosting; the default on PocketBook)
         ├── Portrait / Landscape animation frame delay: … ms
         ├── Portrait / Landscape animation steps: …
-        ├── Minimum gap between page turns: … ms      (default 450 on PocketBook, 0 elsewhere)
+        ├── Minimum gap between page turns: … ms      (default 250 on PocketBook, 0 elsewhere)
         ├── Gap after a full refresh or direction change: … ms  (default 430 on PocketBook, 0 elsewhere)
-        ├── Animated turns in a row: …                (default 3 on PocketBook, no limit elsewhere)
+        ├── Animated turns in a row: …                (default no limit)
         ├── ☑ Mild global refresh
         ├── ☑ Kobo MTK: direct strip updates          (black-and-white Kobo MTK devices, on by default)
         ├── ☑ Kobo MTK: wake panel on touch           (Kobo MTK devices, on by default)
@@ -218,10 +220,12 @@ help there: InkView's `WaitForUpdateComplete()` returns at once, and KOReader's
 So page turns are paced by time, with the two rules that fixed the same tearing in the
 Kobalt port's screen plugin:
 
-* **Minimum gap between page turns** (default 450 ms on PocketBook, 0 elsewhere), measured
+* **Minimum gap between page turns** (default 250 ms on PocketBook, 0 elsewhere), measured
   from the last screen update, strip or plain refresh. A turn that comes sooner sleeps out
-  the remainder *before* the new page is painted; with the ~200 ms the strips take, animated
-  turns end up at least ~650 ms apart.
+  the remainder *before* the new page is painted. With the ~130 ms the strips take and ~45
+  ms to draw the page, each spot on the panel is redrawn about 430 ms later, just past the
+  388 ms the Era Lite needs. A shorter gap, or a wipe with fewer or faster strips, eats into
+  that margin.
 * **Gap after a full refresh or direction change** (default 430 ms on PocketBook, 0
   elsewhere). A page that lands on an update the panel is still drawing tears. Turns in one
   direction are the easy case: each strip lands where the panel finished long ago. A full
@@ -230,20 +234,17 @@ Kobalt port's screen plugin:
   update. The Era Lite's panel takes 388 ms for its standard waveform; 350 ms tore there, and
   400 ms still tore now and then. If you reverse direction slowly, or turn the page long
   after a flash, there is no wait.
-* **Animated turns in a row** (default 3 on PocketBook, no limit elsewhere). Turns less than
-  0.7 s apart form a burst; from the fourth one on the wipe is dropped and the page is shown
-  with a plain refresh, until the turns slow down again. A plain refresh also lands on
-  strips the panel may still be drawing, so with a short minimum gap it is better to set
-  this to no limit.
+* **Animated turns in a row** (default no limit). Turns less than 0.7 s apart form a burst;
+  from the chosen number on the wipe is dropped and the page is shown with a plain refresh,
+  until the turns slow down again. A plain refresh also lands on strips the panel may still
+  be drawing, so with a short minimum gap it is better to leave this at no limit.
 
 All of these are in the settings menu. The tearing has not been seen on the Kobo Clara BW
 (the MTK driver waits for the submission of each update), so other devices default to off;
-if a quick burst of turns tears on yours, try 450 ms and 3.
+if a quick burst of turns tears on yours, try a 450 ms minimum gap and 3 animated turns.
 
-On the PocketBook Era Lite, the values that felt best, without tearing, were: *Fast
-refresh*, 16 ms frame delay, 8 steps, 250 ms minimum gap, 430 ms gap after a full refresh or
-direction change, and no limit on animated turns. Only the 430 ms is a default; the rest
-are safe to try on your own device.
+The PocketBook defaults were tuned by eye on an Era Lite, in portrait. Other PocketBook
+models may have a slower panel; if yours tears, raise the two gaps.
 
 ### Android and other non-e-ink displays
 

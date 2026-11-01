@@ -28,6 +28,9 @@ local zh_fallback = {
     ["Save"] = "保存",
     ["Swipe animation refresh mode"] = "翻页动画刷新模式",
     ["UI refresh (default, recommended)"] = "UI刷新（默认，推荐）",
+    ["UI refresh"] = "UI刷新",
+    ["Fast refresh (default)"] = "Fast刷新（默认）",
+    ["On PocketBook, Fast refresh is the default."] = "在 PocketBook 上，默认使用 Fast 刷新。",
     ["Fast refresh (fastest, more ghosting)"] = "Fast刷新（最快，易残影）",
     ["%1 animation frame delay: %2 ms"] = "%1动画帧延迟：%2 毫秒",
     ["%1 animation frame delay: default %2 ms"] = "%1动画帧延迟：默认 %2 毫秒",
@@ -117,6 +120,9 @@ local pt_BR_fallback = {
     ["Save"] = "Salvar",
     ["Swipe animation refresh mode"] = "Modo de atualização da animação de deslizar",
     ["UI refresh (default, recommended)"] = "Atualização da interface (padrão, recomendado)",
+    ["UI refresh"] = "Atualização da interface",
+    ["Fast refresh (default)"] = "Atualização rápida (padrão)",
+    ["On PocketBook, Fast refresh is the default."] = "No PocketBook, a atualização rápida é o padrão.",
     ["Fast refresh (fastest, more ghosting)"] = "Atualização rápida (mais veloz, mais ghosting)",
     ["%1 animation frame delay: %2 ms"] = "%1 - intervalo entre quadros: %2 ms",
     ["%1 animation frame delay: default %2 ms"] = "%1 - intervalo entre quadros: padrão (%2 ms)",
@@ -399,6 +405,7 @@ local function radioItem(text, checked_func, callback)
 end
 
 local function buildEinkItems(Hook)
+    local fast_default = Hook.getDefaultRefreshMode() == "fast"
     local items = {
         toggleItem(),
         {
@@ -410,12 +417,13 @@ Choose the refresh type used for each strip of the software swipe animation.
 • UI refresh (default): balanced quality and speed, suitable for most cases.
 • Fast refresh: fastest, best for smoothness when some ghosting is acceptable.
 
-Changes take effect immediately.]]),
+Changes take effect immediately.]])
+                .. (fast_default and "\n\n" .. _("On PocketBook, Fast refresh is the default.") or ""),
             sub_item_table = {
-                radioItem(_("UI refresh (default, recommended)"),
+                radioItem(fast_default and _("UI refresh") or _("UI refresh (default, recommended)"),
                     function() return Hook.getRefreshMode() == "ui" end,
                     function() Hook.setRefreshMode("ui") end),
-                radioItem(_("Fast refresh (fastest, more ghosting)"),
+                radioItem(fast_default and _("Fast refresh (default)") or _("Fast refresh (fastest, more ghosting)"),
                     function() return Hook.getRefreshMode() == "fast" end,
                     function() Hook.setRefreshMode("fast") end),
             },
@@ -477,7 +485,7 @@ Fewer strips make the turn faster, more strips make the sweep smoother. Portrait
             help_text = _([[
 Pages turned quickly can show strips of two pages mixed on the panel: the display controller is still executing the previous strips when the next page is drawn. A minimum gap since the last screen update gives it time to finish; a turn that comes sooner waits for the remainder.
 
-Default: 450 ms on PocketBook, 0 (off) on other devices.]]),
+Default: 250 ms on PocketBook, 0 (off) on other devices.]]),
         },
         {
             text_func = function()
@@ -515,7 +523,7 @@ Default: 430 ms on PocketBook, 0 (off) on other devices.]]),
             help_text = _([[
 When pages are turned in quick succession (less than 0.7 s apart), only the first few turns are animated; the following ones use a plain refresh until the turns slow down. The display controller absorbs a few wipes before its queue falls behind and strips of two pages appear.
 
-Default: 3 on PocketBook, no limit on other devices.]]),
+Default: no limit. With a short minimum gap, keep it that way: the plain refresh can tear too.]]),
         },
         {
             text = _("Mild global refresh"),

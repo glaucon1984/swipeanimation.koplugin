@@ -82,14 +82,17 @@ local Screen = Device.screen
 local Hook = {
     -- Shared tuning defaults, also displayed by the settings menu.
     defaults = {
-        delay_ms = { landscape = 10, portrait = 20 },
-        steps = { landscape = 6, portrait = 8 },
+        -- PocketBook: what felt best on the Era Lite without tearing. Both
+        -- orientations use one value, so a wipe takes as long in landscape.
+        delay_ms = { landscape = 10, portrait = 20, pocketbook = 16 },
+        steps = { landscape = 6, portrait = 8, pocketbook = 8 },
+        refresh_mode = { pocketbook = "fast", other = "ui" },
         lcd_duration_ms = 250,
         lcd_style = "slide",
         -- Pacing (see the header): PocketBook needs it, the Kobo Clara BW
         -- has not shown the tearing, so other devices default to off.
-        min_gap_ms = { pocketbook = 450, other = 0 },
-        burst_wipes = { pocketbook = 3, other = 0 }, -- 0 = no limit
+        min_gap_ms = { pocketbook = 250, other = 0 },
+        burst_wipes = { pocketbook = 0, other = 0 }, -- 0 = no limit
         -- The Era Lite's GC16 takes 388 ms: 350 tears, 400 tore now and then.
         full_gap_ms = { pocketbook = 430, other = 0 },
     },
@@ -162,6 +165,7 @@ end
 function Hook.getDefaultDelayMs(landscape)
     -- The submission wait of a direct strip already paces the wipe.
     if Hook.usesDirectStrips() then return 0 end
+    if Hook.isPocketBook() then return Hook.defaults.delay_ms.pocketbook end
     if landscape == nil then landscape = Hook.isLandscape() end
     return landscape and Hook.defaults.delay_ms.landscape or Hook.defaults.delay_ms.portrait
 end
@@ -197,6 +201,7 @@ function Hook.getDefaultSteps(landscape)
     if Hook.usesDirectStrips() then
         return math.max(Screen.bb:getWidth(), Screen.bb:getHeight()) >= 1600 and 12 or 10
     end
+    if Hook.isPocketBook() then return Hook.defaults.steps.pocketbook end
     if landscape == nil then landscape = Hook.isLandscape() end
     return landscape and Hook.defaults.steps.landscape or Hook.defaults.steps.portrait
 end
@@ -224,17 +229,21 @@ function Hook.setConfiguredSteps(landscape, steps)
     end
 end
 
+function Hook.getDefaultRefreshMode()
+    return Hook.isPocketBook() and Hook.defaults.refresh_mode.pocketbook or Hook.defaults.refresh_mode.other
+end
+
 function Hook.getRefreshMode()
     local mode = G_reader_settings:readSetting("swipe_animation_refresh_mode")
-    if mode == "fast" then return "fast" end
-    return "ui"
+    if mode == "fast" or mode == "ui" then return mode end
+    return Hook.getDefaultRefreshMode()
 end
 
 function Hook.setRefreshMode(mode)
-    if mode == "fast" then
-        G_reader_settings:saveSetting("swipe_animation_refresh_mode", "fast")
-    else
+    if mode == Hook.getDefaultRefreshMode() then
         G_reader_settings:delSetting("swipe_animation_refresh_mode")
+    else
+        G_reader_settings:saveSetting("swipe_animation_refresh_mode", mode)
     end
 end
 
