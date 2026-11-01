@@ -57,7 +57,10 @@
     on PocketBook, where WaitForUpdateComplete() returns at once, so page
     turns are paced by time instead: a minimum gap since the last refresh,
     slept out before the new page is painted, and a cap on how many quick
-    turns in a row still get a wipe (see paceTurn()).
+    turns in a row still get a wipe (see paceTurn()). Turns in one direction
+    are the easy case: each strip lands where the panel finished long ago.
+    After a full refresh, or when the direction changes, the next page lands
+    on an update the panel may still be drawing, so those get a longer gap.
 
     Direct strips (black-and-white Kobo MTK panels, see
     directStripRefresh()): the strips are sent straight to the HWTCON driver
@@ -87,6 +90,8 @@ local Hook = {
         -- has not shown the tearing, so other devices default to off.
         min_gap_ms = { pocketbook = 450, other = 0 },
         burst_wipes = { pocketbook = 3, other = 0 }, -- 0 = no limit
+        -- The Era Lite's GC16 takes 388 ms: 350 tears, 400 tore now and then.
+        full_gap_ms = { pocketbook = 430, other = 0 },
     },
     MIN_STEPS = 2,
     MAX_STEPS = 32,
@@ -339,6 +344,29 @@ function Hook.getDefaultMinGapMs()
     return Hook.isPocketBook() and Hook.defaults.min_gap_ms.pocketbook or Hook.defaults.min_gap_ms.other
 end
 
+function Hook.getDefaultFullGapMs()
+    return Hook.isPocketBook() and Hook.defaults.full_gap_ms.pocketbook or Hook.defaults.full_gap_ms.other
+end
+
+-- 0 is a valid value: no gap.
+function Hook.getConfiguredFullGapMs()
+    local ms = tonumber(G_reader_settings:readSetting("swipe_animation_full_gap_ms"))
+    if ms == nil or ms < 0 then return nil end
+    return math.min(math.floor(ms), Hook.MAX_MIN_GAP_MS)
+end
+
+function Hook.setConfiguredFullGapMs(ms)
+    if ms == nil or ms < 0 then
+        G_reader_settings:delSetting("swipe_animation_full_gap_ms")
+    else
+        G_reader_settings:saveSetting("swipe_animation_full_gap_ms", math.min(math.floor(ms), Hook.MAX_MIN_GAP_MS))
+    end
+end
+
+function Hook.getFullGapMs()
+    return Hook.getConfiguredFullGapMs() or Hook.getDefaultFullGapMs()
+end
+
 -- 0 is a valid value: no gap.
 function Hook.getConfiguredMinGapMs()
     local ms = tonumber(G_reader_settings:readSetting("swipe_animation_min_gap_ms"))
@@ -526,6 +554,9 @@ end
 local function passThrough(state, fn, screen, x, y, w, h, dither)
     local result = fn(screen, x, y, w, h, dither)
     stamp(state)
+    if fn == state.originals.refreshFullImp then
+        state.last_full_ms = state.last_update_ms
+    end
     return result
 end
 
@@ -535,7 +566,10 @@ end
 --     counted; from the burst_wipes-th one on the wipe is dropped and the
 --     turn is shown with the plain refresh, until the turns slow down;
 --   * gap: the next page is not painted until min_gap_ms have passed since
---     the last refresh, so the controller has finished reading the old one.
+--     the last refresh, so the controller has finished reading the old one,
+--     and at least full_gap_ms since the last full refresh. A wipe ends at
+--     the edge where a wipe in the other direction starts, so a turn that
+--     changes direction also waits for full_gap_ms since the last refresh.
 local function paceTurn(state)
     local now = Hook._clock_ms()
     local since = state.last_update_ms and (now - state.last_update_ms) or math.huge
@@ -549,8 +583,14 @@ local function paceTurn(state)
     state.skip_wipe = burst > 0 and state.quick_turns >= burst
 
     local gap = Hook.getMinGapMs()
-    if since < gap then
-        local wait = gap - since
+    local wait = gap - since
+    if state.last_full_ms then
+        wait = math.max(wait, Hook.getFullGapMs() - (now - state.last_full_ms))
+    end
+    if state.last_wipe_forward ~= nil and state.last_wipe_forward ~= state.forward then
+        wait = math.max(wait, Hook.getFullGapMs() - since)
+    end
+    if wait > 0 then
         logger.dbg("SwipeAnimation: pacing the page turn by", wait, "ms")
         ffiUtil.usleep(math.floor(wait * 1000 + 0.5))
     end
@@ -854,6 +894,7 @@ local function interceptRefreshImp(state, name, original)
         freeBuffer(new_bb)
         -- The last strip (or frame) is the last update handed to the panel.
         stamp(state)
+        state.last_wipe_forward = state.forward
         state.suppress = true
     end
 end
@@ -1007,6 +1048,8 @@ function Hook.install()
         originals = {},
         last_frame_count = nil,
         last_update_ms = nil, -- e-ink: when the last refresh was issued (Hook._clock_ms)
+        last_full_ms = nil,   -- e-ink: when the last full refresh was issued
+        last_wipe_forward = nil, -- e-ink: the direction of the last wipe
         quick_turns = 0,      -- e-ink: consecutive page turns within BURST_WINDOW_MS
         skip_wipe = false,    -- e-ink: this turn is past the burst, plain refresh
         mtk_update = nil,     -- Kobo MTK: the update struct of the direct strips

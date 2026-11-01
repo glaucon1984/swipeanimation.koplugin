@@ -45,6 +45,9 @@ local zh_fallback = {
     ["Minimum gap between page turns"] = "翻页最小间隔",
     ["Minimum gap between page turns: %1 ms"] = "翻页最小间隔：%1 毫秒",
     ["Minimum gap between page turns: default %1 ms"] = "翻页最小间隔：默认 %1 毫秒",
+    ["Gap after a full refresh or direction change"] = "全屏刷新或换向后的间隔",
+    ["Gap after a full refresh or direction change: %1 ms"] = "全屏刷新或换向后的间隔：%1 毫秒",
+    ["Gap after a full refresh or direction change: default %1 ms"] = "全屏刷新或换向后的间隔：默认 %1 毫秒",
     ["Animated turns in a row"] = "连续动画翻页次数",
     ["Animated turns in a row: %1"] = "连续动画翻页次数：%1",
     ["Animated turns in a row: default %1"] = "连续动画翻页次数：默认 %1",
@@ -131,6 +134,9 @@ local pt_BR_fallback = {
     ["Minimum gap between page turns"] = "Intervalo mínimo entre viradas de página",
     ["Minimum gap between page turns: %1 ms"] = "Intervalo mínimo entre viradas de página: %1 ms",
     ["Minimum gap between page turns: default %1 ms"] = "Intervalo mínimo entre viradas de página: padrão (%1 ms)",
+    ["Gap after a full refresh or direction change"] = "Intervalo após atualização completa ou mudança de direção",
+    ["Gap after a full refresh or direction change: %1 ms"] = "Intervalo após atualização completa ou mudança de direção: %1 ms",
+    ["Gap after a full refresh or direction change: default %1 ms"] = "Intervalo após atualização completa ou mudança de direção: padrão (%1 ms)",
     ["Animated turns in a row"] = "Viradas animadas em sequência",
     ["Animated turns in a row: %1"] = "Viradas animadas em sequência: %1",
     ["Animated turns in a row: default %1"] = "Viradas animadas em sequência: padrão (%1)",
@@ -335,6 +341,20 @@ Enter the minimum time between the last screen update and the next page turn, in
     }, touchmenu_instance)
 end
 
+local function showFullGapDialog(Hook, touchmenu_instance)
+    local default_ms = Hook.getDefaultFullGapMs()
+    showNumberDialog({
+        title = _("Gap after a full refresh or direction change"),
+        current = Hook.getConfiguredFullGapMs() or default_ms,
+        min = 0,
+        description = T(_([[
+Enter the minimum time before a page turn that follows a full refresh or changes direction, in milliseconds (0 to %1). A turn that comes sooner waits for the remainder before the new page is drawn.
+
+0 disables the gap. Current default: %2 ms]]), Hook.MAX_MIN_GAP_MS, default_ms),
+        save = function(value) Hook.setConfiguredFullGapMs(value) end,
+    }, touchmenu_instance)
+end
+
 local function showBurstDialog(Hook, touchmenu_instance)
     local default_n = Hook.getDefaultBurstWipes()
     showNumberDialog({
@@ -458,6 +478,26 @@ Fewer strips make the turn faster, more strips make the sweep smoother. Portrait
 Pages turned quickly can show strips of two pages mixed on the panel: the display controller is still executing the previous strips when the next page is drawn. A minimum gap since the last screen update gives it time to finish; a turn that comes sooner waits for the remainder.
 
 Default: 450 ms on PocketBook, 0 (off) on other devices.]]),
+        },
+        {
+            text_func = function()
+                local configured = Hook.getConfiguredFullGapMs()
+                if configured then
+                    return T(_("Gap after a full refresh or direction change: %1 ms"), configured)
+                end
+                return T(_("Gap after a full refresh or direction change: default %1 ms"), Hook.getDefaultFullGapMs())
+            end,
+            enabled_func = isAnimationEnabled,
+            keep_menu_open = true,
+            callback = function(touchmenu_instance)
+                showFullGapDialog(Hook, touchmenu_instance)
+            end,
+            help_text = _([[
+A page that lands on an update the panel is still drawing can tear. That happens after a full refresh, whatever caused it (a chapter boundary, a page with images, the periodic full refresh), and when the turning direction changes, because the new wipe starts at the edge where the last one ended. This gap holds such a turn until that much time has passed.
+
+Lower it if those turns feel slow, and raise it again if they tear.
+
+Default: 430 ms on PocketBook, 0 (off) on other devices.]]),
         },
         {
             text_func = function()
