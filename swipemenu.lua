@@ -39,6 +39,9 @@ local zh_fallback = {
     ["%1 animation steps: %2"] = "%1动画步数：%2",
     ["%1 animation steps: default %2"] = "%1动画步数：默认 %2",
     ["Kobo MTK: sync panel before animation"] = "Kobo MTK：动画前同步屏幕",
+    ["Kobo MTK: direct strip updates"] = "Kobo MTK：直接发送条带刷新",
+    ["Kobo MTK: wake panel on touch"] = "Kobo MTK：触摸时唤醒屏幕",
+    ["Log page-turn timing"] = "记录翻页耗时",
     ["Minimum gap between page turns"] = "翻页最小间隔",
     ["Minimum gap between page turns: %1 ms"] = "翻页最小间隔：%1 毫秒",
     ["Minimum gap between page turns: default %1 ms"] = "翻页最小间隔：默认 %1 毫秒",
@@ -122,6 +125,9 @@ local pt_BR_fallback = {
     ["%1 animation steps: %2"] = "%1 - passos da animação: %2",
     ["%1 animation steps: default %2"] = "%1 - passos da animação: padrão (%2)",
     ["Kobo MTK: sync panel before animation"] = "Kobo MTK: sincronizar o painel antes da animação",
+    ["Kobo MTK: direct strip updates"] = "Kobo MTK: atualização direta das faixas",
+    ["Kobo MTK: wake panel on touch"] = "Kobo MTK: despertar o painel ao toque",
+    ["Log page-turn timing"] = "Registrar o tempo das viradas de página",
     ["Minimum gap between page turns"] = "Intervalo mínimo entre viradas de página",
     ["Minimum gap between page turns: %1 ms"] = "Intervalo mínimo entre viradas de página: %1 ms",
     ["Minimum gap between page turns: default %1 ms"] = "Intervalo mínimo entre viradas de página: padrão (%1 ms)",
@@ -373,7 +379,7 @@ local function radioItem(text, checked_func, callback)
 end
 
 local function buildEinkItems(Hook)
-    return {
+    local items = {
         toggleItem(),
         {
             text = _("Swipe animation refresh mode"),
@@ -484,7 +490,47 @@ Default: 3 on PocketBook, no limit on other devices.]]),
 
 • Unchecked: use full refresh (for content with images)]]),
         },
-        Hook.isKoboMTK() and {
+    }
+    if Hook.canUseDirectStrips() then
+        table.insert(items, {
+            text = _("Kobo MTK: direct strip updates"),
+            enabled_func = isAnimationEnabled,
+            checked_func = Hook.isDirectStripsEnabled,
+            callback = function(touchmenu_instance)
+                Hook.setDirectStripsEnabled(not Hook.isDirectStripsEnabled())
+                refreshMenu(touchmenu_instance)
+            end,
+            help_text = _([[
+Send each strip straight to the display driver with the reading waveform, as Kobalt does, instead of the automatic waveform of KOReader's UI refresh.
+
+Pages with dithered images and the Fast refresh mode keep the automatic path.]]),
+        })
+    end
+    if Hook.canWakeOnTouch() then
+        table.insert(items, {
+            text = _("Kobo MTK: wake panel on touch"),
+            enabled_func = isAnimationEnabled,
+            checked_func = Hook.isTouchWakeEnabled,
+            callback = function(touchmenu_instance)
+                Hook.setTouchWakeEnabled(not Hook.isTouchWakeEnabled())
+                refreshMenu(touchmenu_instance)
+            end,
+            help_text = _([[
+Wake the display controller as soon as a finger touches the screen, as Nickel does, instead of right before the first strip.]]),
+        })
+    end
+    table.insert(items, {
+        text = _("Log page-turn timing"),
+        checked_func = Hook.isTimingEnabled,
+        callback = function(touchmenu_instance)
+            Hook.setTimingEnabled(not Hook.isTimingEnabled())
+            refreshMenu(touchmenu_instance)
+        end,
+        help_text = _([[
+Write one line per page turn to crash.log, with the time spent in each stage from the tap to the first strip.]]),
+    })
+    if Hook.isKoboMTK() then
+        table.insert(items, {
             text = _("Kobo MTK: sync panel before animation"),
             enabled_func = isAnimationEnabled,
             checked_func = Hook.isMTKFenceEnabled,
@@ -496,8 +542,9 @@ Default: 3 on PocketBook, no limit on other devices.]]),
 Before the strips start, wait for the previous screen update and send one no-change full-screen update, so the first strip is not delayed by the display controller.
 
 Legacy option inherited from the original patch, off by default. Turn it on only if the first strip of a page turn is visibly slower than the rest on your panel; page turns start a little later with it on.]]),
-        } or nil, -- must be the last item
-    }
+        })
+    end
+    return items
 end
 
 local function buildLCDItems(Hook)

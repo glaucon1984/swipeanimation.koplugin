@@ -39,6 +39,9 @@ existing settings carry over. What changed:
 * **Mild global refresh**: replace the periodic full (flashing) refresh by a partial one
 * Kobo MTK (Clara BW / Colour, Libra Colour, …) driver-aligned strips and an optional
   legacy refresh fence (off by default)
+* **Direct strip updates** on black-and-white Kobo MTK panels (Clara BW) and **panel wake
+  on touch** on all Kobo MTK devices, for a page turn that starts as quickly as in Kobalt
+  and Nickel; both on by default, see *Performance*
 * **Pacing for quick page turns** on panels whose controller executes updates
   asynchronously (PocketBook): a minimum gap between turns and a cap on animated turns in
   a row, both adjustable; on by default on PocketBook, off elsewhere
@@ -109,6 +112,9 @@ Settings (⚙)
         ├── Minimum gap between page turns: … ms      (default 450 on PocketBook, 0 elsewhere)
         ├── Animated turns in a row: …                (default 3 on PocketBook, no limit elsewhere)
         ├── ☑ Mild global refresh
+        ├── ☑ Kobo MTK: direct strip updates          (black-and-white Kobo MTK devices, on by default)
+        ├── ☑ Kobo MTK: wake panel on touch           (Kobo MTK devices, on by default)
+        ├── ☐ Log page-turn timing                    (writes to crash.log, off by default)
         └── ☐ Kobo MTK: sync panel before animation   (Kobo MTK devices only, legacy)
 ```
 
@@ -177,6 +183,25 @@ The remaining knobs are the strip count and the frame delay. Fewer strips or a s
 delay make the turn faster; *Fast refresh* (DU waveform) makes each strip cheaper on MTK
 Kobos in particular, because the driver does not wait for the submission of DU updates, at
 the cost of more ghosting.
+
+Two options make a page turn feel much more immediate on Kobo MTK devices. Both are on by
+default where they apply, and on the Clara BW the difference is easy to feel:
+
+* **Direct strip updates** (black-and-white panels). KOReader promotes every REAGL update to
+  a full update that blocks until the panel is done, so through its refresh functions a
+  strip can only use the AUTO waveform. The plugin sends the strips straight to the HWTCON
+  driver instead, with the reading waveform (GLR16, GLKW16 in night mode) in partial mode and
+  a wait for submission after each one, as Kobalt and NickelDissolve do. The strip count then
+  defaults to 10 (12 on panels of 1600 px and up) and the frame delay to 0, because the
+  submission wait already paces the wipe. Dithered pages and *Fast refresh* keep the
+  automatic path. Colour panels and the Elipsa 2E are not supported.
+* **Wake panel on touch**. Nickel wakes the display controller as soon as a finger touches
+  the screen, at most every 1.5 s; KOReader does it right before each refresh. The plugin
+  does it Nickel's way while a book is open.
+
+*Log page-turn timing* writes one line per page turn to `crash.log`, with the time from the
+tap to the moment the driver has taken the first strip, stage by stage. It ends there, so it
+does not include how long the panel takes to start changing.
 
 ### Quick page turns (pacing)
 
@@ -253,6 +278,9 @@ Files:
   **小红薯6809667F**, **斯普特尼克的漫游** and the other
   [Swipe_Animation contributors](https://github.com/koplugin-swipe-animation/Swipe_Animation.koplugin/graphs/contributors)
 * Plugin re-packaging, runtime hooks and performance work: this repository
+* Direct strip updates follow the band submission of
+  [NickelDissolve](https://github.com/nicoverbruggen/NickelDissolve) and
+  [Kobalt](https://github.com/nicoverbruggen/kobalt) by Nico Verbruggen
 
 ## License
 

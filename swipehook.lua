@@ -58,10 +58,19 @@
     turns are paced by time instead: a minimum gap since the last refresh,
     slept out before the new page is painted, and a cap on how many quick
     turns in a row still get a wipe (see paceTurn()).
+
+    Direct strips (black-and-white Kobo MTK panels, see
+    directStripRefresh()): the strips are sent straight to the HWTCON driver
+    with the reading waveform in partial mode, as Kobalt and NickelDissolve
+    do. KOReader's own refresh path cannot do that: it promotes REAGL to a
+    full update that blocks until the panel is done, so through it a strip
+    has to use the AUTO waveform. The panel is also woken at touch-down, as
+    Nickel does, instead of right before the first strip.
 ]]
 
 local Device = require("device")
 local Event = require("ui/event")
+local ffi = require("ffi")
 local ffiUtil = require("ffi/util")
 local logger = require("logger")
 
@@ -87,6 +96,10 @@ local Hook = {
     MAX_BURST_WIPES = 100,
     -- Turns closer than this to the previous refresh count as a burst.
     BURST_WINDOW_MS = 700,
+    -- Nickel wakes the panel on touch, at most this often.
+    MTK_WAKE_INTERVAL_MS = 1500,
+    -- A touch lift older than this did not cause the page turn being timed.
+    TIMING_TAP_WINDOW_MS = 1000,
 }
 
 local IMP_METHODS = {
@@ -142,6 +155,8 @@ function Hook.isLandscape()
 end
 
 function Hook.getDefaultDelayMs(landscape)
+    -- The submission wait of a direct strip already paces the wipe.
+    if Hook.usesDirectStrips() then return 0 end
     if landscape == nil then landscape = Hook.isLandscape() end
     return landscape and Hook.defaults.delay_ms.landscape or Hook.defaults.delay_ms.portrait
 end
@@ -174,6 +189,9 @@ function Hook.setConfiguredDelayMs(landscape, delay_ms)
 end
 
 function Hook.getDefaultSteps(landscape)
+    if Hook.usesDirectStrips() then
+        return math.max(Screen.bb:getWidth(), Screen.bb:getHeight()) >= 1600 and 12 or 10
+    end
     if landscape == nil then landscape = Hook.isLandscape() end
     return landscape and Hook.defaults.steps.landscape or Hook.defaults.steps.portrait
 end
@@ -244,6 +262,70 @@ function Hook.setMTKFenceEnabled(enabled)
         G_reader_settings:saveSetting("swipe_animation_mtk_fence", true)
     else
         G_reader_settings:delSetting("swipe_animation_mtk_fence")
+    end
+end
+
+-- Black-and-white Kobo MTK panels only: colour panels need their own
+-- waveforms, and the Elipsa 2E drives REAGL differently.
+local direct_strips_supported
+function Hook.canUseDirectStrips()
+    if direct_strips_supported == nil then
+        direct_strips_supported = Hook.isKoboMTK()
+            and Device.model ~= "Kobo_condor"
+            and not Device:hasColorScreen()
+            and Screen.fd and Screen._get_next_marker and Screen.mech_wait_update_submission
+            and pcall(function()
+                require("ffi/posix_h")
+                require("ffi/mxcfb_kobo_h")
+                return ffi.C.HWTCON_SEND_UPDATE
+            end)
+            or false
+    end
+    return direct_strips_supported
+end
+
+function Hook.isDirectStripsEnabled()
+    return G_reader_settings:nilOrTrue("swipe_animation_direct_strips")
+end
+
+function Hook.setDirectStripsEnabled(enabled)
+    if enabled then
+        G_reader_settings:delSetting("swipe_animation_direct_strips")
+    else
+        G_reader_settings:saveSetting("swipe_animation_direct_strips", false)
+    end
+end
+
+-- The Fast refresh mode keeps its DU strips.
+function Hook.usesDirectStrips()
+    return Hook.canUseDirectStrips() and Hook.isDirectStripsEnabled() and Hook.getRefreshMode() ~= "fast"
+end
+
+function Hook.canWakeOnTouch()
+    return Hook.isKoboMTK() and Screen.mech_poweron ~= nil
+end
+
+function Hook.isTouchWakeEnabled()
+    return G_reader_settings:nilOrTrue("swipe_animation_touch_wake")
+end
+
+function Hook.setTouchWakeEnabled(enabled)
+    if enabled then
+        G_reader_settings:delSetting("swipe_animation_touch_wake")
+    else
+        G_reader_settings:saveSetting("swipe_animation_touch_wake", false)
+    end
+end
+
+function Hook.isTimingEnabled()
+    return G_reader_settings:isTrue("swipe_animation_log_timing")
+end
+
+function Hook.setTimingEnabled(enabled)
+    if enabled then
+        G_reader_settings:saveSetting("swipe_animation_log_timing", true)
+    else
+        G_reader_settings:delSetting("swipe_animation_log_timing")
     end
 end
 
@@ -337,9 +419,11 @@ end
 -- Milliseconds from a monotonic clock. Uses KOReader's ui/time when
 -- available (fine-grained monotonic), os.clock otherwise.
 local clock_ms
+local time
 do
-    local ok, time = pcall(require, "ui/time")
-    if ok and type(time) == "table" and time.to_ms and (time.monotonic or time.now) then
+    local ok, ui_time = pcall(require, "ui/time")
+    if ok and type(ui_time) == "table" and ui_time.to_ms and (ui_time.monotonic or ui_time.now) then
+        time = ui_time
         local now = time.monotonic or time.now
         clock_ms = function() return time.to_ms(now()) end
     else
@@ -347,6 +431,89 @@ do
     end
 end
 Hook._clock_ms = clock_ms -- tests replace this
+
+-- ==================== page-turn timing log (e-ink) ====================
+
+-- Stamp a stage of the page turn being timed.
+local function mark(state, stage)
+    local t = state.t
+    if t then t[stage] = Hook._clock_ms() end
+end
+
+local function setTimingMode(state, mode)
+    if state.t then state.t.mode = mode end
+end
+
+-- How long ago, in ms, the kernel stamped this input event.
+local function inputAgeMs(detector, timev)
+    local C = ffi.C
+    local id = detector:getClockSource()
+    local now
+    if id == C.CLOCK_REALTIME then
+        now = time.realtime()
+    elseif id == C.CLOCK_MONOTONIC then
+        now = time.monotonic()
+    elseif id == C.CLOCK_BOOTTIME then
+        now = time.boottime()
+    end
+    return now and time.to_ms(now - timev)
+end
+
+local function span(from, to)
+    return (from and to) and string.format("%.0f", to - from) or "-"
+end
+
+-- One line per page turn in crash.log, all in ms. first_strip ends when the
+-- driver has taken the strip, about when the panel starts to change.
+local function logTurn(state)
+    local t = state.t
+    state.t = nil
+    local lift = state.lift_ms
+    state.lift_ms = nil
+    if lift and not (t.turn >= lift and t.turn - lift < Hook.TIMING_TAP_WINDOW_MS) then
+        lift = nil -- not a tap: a page-turn key, or an old touch
+    end
+    local start = t.wake1 or t.refresh
+    local tap = lift and (lift - (state.lift_age_ms or 0))
+    logger.info(string.format(
+        "SwipeAnimation timing: mode=%s tap_to_input=%s input_to_turn=%s turn_to_paint=%s paint=%s wake=%s first_strip=%s wipe=%s tap_to_first_strip=%s touch_wake=%s",
+        t.mode or "plain",
+        span(tap, lift), span(lift, t.turn), span(t.turn, t.paint), span(t.paint, t.refresh),
+        span(t.wake0, t.wake1), span(start, t.first), span(t.first, t.done), span(tap, t.first),
+        state.touch_wake_cost_ms and string.format("%.0f", state.touch_wake_cost_ms) or "-"))
+    state.touch_wake_cost_ms = nil
+end
+
+-- ==================== panel wake (Kobo MTK) ====================
+
+-- Returns how long the wake took, or nil if the panel was woken recently.
+local function wakePanel(state, screen)
+    local start = Hook._clock_ms()
+    if state.last_wake_ms and start - state.last_wake_ms < Hook.MTK_WAKE_INTERVAL_MS then
+        return nil
+    end
+    screen:mech_poweron()
+    state.last_wake_ms = Hook._clock_ms()
+    return state.last_wake_ms - start
+end
+
+-- Sees every input frame before the gesture detector does.
+local function noteTouch(state, detector, tevs)
+    for _, tev in ipairs(tevs) do
+        if tev.id == -1 then
+            if Hook.isTimingEnabled() then
+                state.lift_ms = Hook._clock_ms()
+                local ok, age = pcall(inputAgeMs, detector, tev.timev)
+                state.lift_age_ms = ok and age or nil
+            end
+        elseif not detector:getContact(tev.slot) then
+            -- A new finger on the screen.
+            if Hook.canWakeOnTouch() and Hook.isTouchWakeEnabled() then
+                state.touch_wake_cost_ms = wakePanel(state, Screen) or state.touch_wake_cost_ms
+            end
+        end
+    end
+end
 
 -- ==================== pacing (e-ink) ====================
 
@@ -418,6 +585,53 @@ local function buildStripEdges(x0, x1, steps, align)
 end
 Hook._buildStripEdges = buildStripEdges -- exposed for tests
 
+local function mtkSendUpdate(screen, data)
+    return ffi.C.ioctl(screen.fd, ffi.C.HWTCON_SEND_UPDATE, data)
+end
+Hook._mtk_send_update = mtkSendUpdate -- tests replace this
+
+-- A strip refresh with the signature of the original Imp methods that talks
+-- to the driver directly: the reading waveform in partial mode, then a wait
+-- for submission, as Kobalt's PageAnimation::submit() does. Otherwise the
+-- steps mirror mxc_update(), minus the panel wake of every update (wakePanel()
+-- covers the whole wipe). Markers come from the framebuffer's own counter, so
+-- refreshWaitForLast() keeps working.
+local function directStripRefresh(state, screen)
+    local C = ffi.C
+    local data = state.mtk_update
+    if not data then
+        data = ffi.new("struct hwtcon_update_data")
+        state.mtk_update = data
+    end
+    local night = screen.night_mode
+    data.waveform_mode = night and C.HWTCON_WAVEFORM_MODE_GLKW16 or C.HWTCON_WAVEFORM_MODE_GLR16
+    data.update_mode = C.UPDATE_MODE_PARTIAL
+    data.dither_mode = 0
+    data.flags = 0
+    if night and Device:canHWInvert() and not screen:getHWNightmode() then
+        data.flags = C.EPDC_FLAG_ENABLE_INVERSION
+    end
+
+    local bb = screen.full_bb or screen.bb
+    return function(_, x, y, w, h)
+        x, y, w, h = bb:getBoundedRect(x, y, w, h, screen.alignment_constraint)
+        x, y, w, h = bb:getPhysicalRect(x, y, w, h)
+        if w <= 1 or h <= 1 then return end
+        data.update_region.left = x
+        data.update_region.top = y
+        data.update_region.width = w * (screen.refresh_pixel_size or 1)
+        data.update_region.height = h
+        local marker = screen:_get_next_marker()
+        data.update_marker = marker
+        if Hook._mtk_send_update(screen, data) == -1 then
+            error("HWTCON_SEND_UPDATE failed: " .. ffi.errno())
+        end
+        if screen:mech_wait_update_submission(marker) == -1 then
+            error("HWTCON_WAIT_FOR_UPDATE_SUBMISSION failed: " .. ffi.errno())
+        end
+    end
+end
+
 -- Reveal the new page (already in the framebuffer) strip by strip inside
 -- the refresh region. Runs with state.bypass set, so nested refresh calls
 -- go straight to the original framebuffer implementation.
@@ -426,8 +640,19 @@ local function runStripWipe(state, screen, x, y, w, h, dither, forward)
 
     local delay_ms = Hook.getConfiguredDelayMs(landscape) or Hook.getDefaultDelayMs(landscape)
     local steps = Hook.getConfiguredSteps(landscape) or Hook.getDefaultSteps(landscape)
-    local strip_refresh = state.originals[Hook.getRefreshMode() == "fast" and "refreshFastImp" or "refreshUIImp"]
-        or state.originals.refreshPartialImp
+    local strip_refresh
+    -- REAGL is a text waveform: dithered content stays on the AUTO path.
+    if Hook.usesDirectStrips() and not dither then
+        mark(state, "wake0")
+        wakePanel(state, screen)
+        mark(state, "wake1")
+        setTimingMode(state, "direct")
+        strip_refresh = directStripRefresh(state, screen)
+    else
+        setTimingMode(state, "strips")
+        strip_refresh = state.originals[Hook.getRefreshMode() == "fast" and "refreshFastImp" or "refreshUIImp"]
+            or state.originals.refreshPartialImp
+    end
 
     local align = screen.alignment_constraint
     if Device:isKobo() and Device.hasColorScreen and Device:hasColorScreen() then
@@ -443,10 +668,12 @@ local function runStripWipe(state, screen, x, y, w, h, dither, forward)
         if strip_w > 0 then
             strip_refresh(screen, left, y, strip_w, h, dither)
         end
+        if i == 1 then mark(state, "first") end
         if i < nslots and delay_ms > 0 then
             ffiUtil.usleep(delay_ms * 1000)
         end
     end
+    mark(state, "done")
 end
 
 -- Kobo MTK fence, issued while the framebuffer still holds the previous
@@ -568,6 +795,7 @@ local function interceptRefreshImp(state, name, original)
         end
 
         state.armed = false
+        mark(state, "refresh")
         local old_bb = state.old_bb
         state.old_bb = nil
         -- Never let an MTK driver run its own animation on top of ours.
@@ -578,6 +806,7 @@ local function interceptRefreshImp(state, name, original)
         if not lcd and FLASHING[name] then
             -- KOReader asked for a flash (clearing refresh, chapter
             -- boundary, image page): no animation, honour it.
+            setTimingMode(state, "flash")
             if Hook.isMildGlobalRefresh() and state.originals.refreshPartialImp then
                 logger.dbg("SwipeAnimation: mild global refresh instead of", name)
                 return passThrough(state, state.originals.refreshPartialImp, screen, x, y, w, h, dither)
@@ -648,6 +877,7 @@ local function installScreenHooks(state)
                         paceTurn(state)
                         runMTKFence(state, screen)
                     end
+                    mark(state, "paint")
                 end
             end
         end
@@ -660,6 +890,9 @@ local function installScreenHooks(state)
         if not state.bypass then
             state.painting = false
             state.suppress = false
+            if state.t and state.t.refresh then
+                logTurn(state)
+            end
             if state.armed then
                 -- Painted, but no eligible refresh came through: nothing
                 -- to animate this time.
@@ -680,6 +913,9 @@ local function installScreenHooks(state)
             state.original_setSwipeAnimations(screen, enabled, ...)
         end
         state.pending = enabled and true or false
+        if state.pending and state.active and state.display == "eink" and Hook.isTimingEnabled() then
+            state.t = { turn = Hook._clock_ms() }
+        end
     end
 
     state.original_setSwipeDirection = Screen.setSwipeDirection
@@ -732,6 +968,22 @@ local function installPagingHook(state)
     end
 end
 
+-- Touch-down panel wake and the tap time of the timing log.
+local function installInputHook(state)
+    local detector = Device.input and Device.input.gesture_detector
+    if not detector or type(detector.feedEvent) ~= "function" then
+        logger.warn("SwipeAnimation: gesture detector not found, no touch hook")
+        return
+    end
+    state.original_feedEvent = detector.feedEvent
+    detector.feedEvent = function(self, tevs)
+        if state.active then
+            noteTouch(state, self, tevs)
+        end
+        return state.original_feedEvent(self, tevs)
+    end
+end
+
 -- Install every hook once per KOReader process. Safe to call repeatedly.
 -- On an unsupported display class nothing is installed at all.
 function Hook.install()
@@ -757,12 +1009,21 @@ function Hook.install()
         last_update_ms = nil, -- e-ink: when the last refresh was issued (Hook._clock_ms)
         quick_turns = 0,      -- e-ink: consecutive page turns within BURST_WINDOW_MS
         skip_wipe = false,    -- e-ink: this turn is past the burst, plain refresh
+        mtk_update = nil,     -- Kobo MTK: the update struct of the direct strips
+        last_wake_ms = nil,   -- Kobo MTK: when the panel was last woken
+        t = nil,              -- timing log: stage stamps of the current turn
+        lift_ms = nil,        -- timing log: when the last touch lift was seen
+        lift_age_ms = nil,    -- timing log: how old that lift was when seen
+        touch_wake_cost_ms = nil, -- timing log: how long the last touch wake took
     }
     Screen._swipeanimation_state = state
 
     installScreenHooks(state)
     installDeviceHook(state)
     installPagingHook(state)
+    if state.display == "eink" then
+        installInputHook(state)
+    end
     logger.info("SwipeAnimation: hooks installed, display class", state.display)
     return state
 end
@@ -776,6 +1037,8 @@ function Hook.setActive(active)
         state.armed = false
         state.quick_turns = 0
         state.skip_wipe = false
+        state.t = nil
+        state.lift_ms = nil
         freeBuffer(state.old_bb)
         state.old_bb = nil
     end
