@@ -47,6 +47,8 @@ existing settings carry over. What changed:
   asynchronously (PocketBook): a minimum gap between turns, a longer gap after a full
   refresh or a change of direction, and a cap on animated turns in a row, all adjustable;
   the two gaps are on by default on PocketBook, and all of it is off elsewhere
+* **Fast page copy on a half turn** on PocketBook, so a device held the other way up from
+  how KOReader started turns pages as quickly as one held the same way up
 * English, Chinese and Brazilian Portuguese menu strings
 
 ## Requirements and tested devices
@@ -112,7 +114,7 @@ Settings (⚙)
         ├── Portrait / Landscape animation frame delay: … ms
         ├── Portrait / Landscape animation steps: …
         ├── Minimum gap between page turns: … ms      (default 250 on PocketBook, 0 elsewhere)
-        ├── Gap after a full refresh or direction change: … ms  (default 430 on PocketBook, 0 elsewhere)
+        ├── Gap after a full refresh or direction change: … ms  (default 460 on PocketBook, 0 elsewhere)
         ├── Animated turns in a row: …                (default no limit)
         ├── ☑ Mild global refresh
         ├── ☑ Kobo MTK: direct strip updates          (black-and-white Kobo MTK devices, on by default)
@@ -203,8 +205,14 @@ default where they apply, and on the Clara BW the difference is easy to feel:
   does it Nickel's way while a book is open.
 
 *Log page-turn timing* writes one line per page turn to `crash.log`, with the time from the
-tap to the moment the driver has taken the first strip, stage by stage. It ends there, so it
-does not include how long the panel takes to start changing.
+tap or key press to the moment the driver has taken the first strip, stage by stage. It ends
+there, so it does not include how long the panel takes to start changing. Each line also says
+what caused the turn and how the screen was turned.
+
+On PocketBook the firmware keeps a book the way up the device was held when KOReader started,
+and KOReader turns everything itself once the device is held the other way up. Its blitter
+is much slower at that, so the plugin copies EPUB pages into a screen turned 180° with its
+own routine. PDFs, colour screens and landscape keep KOReader's blitter.
 
 ### Quick page turns (pacing)
 
@@ -225,15 +233,20 @@ Kobalt port's screen plugin:
   the remainder *before* the new page is painted. With the ~130 ms the strips take and ~45
   ms to draw the page, each spot on the panel is redrawn about 430 ms later, just past the
   388 ms the Era Lite needs. A shorter gap, or a wipe with fewer or faster strips, eats into
-  that margin.
-* **Gap after a full refresh or direction change** (default 430 ms on PocketBook, 0
+  that margin, and the next setting tops it up.
+* **Gap after a full refresh or direction change** (default 460 ms on PocketBook, 0
   elsewhere). A page that lands on an update the panel is still drawing tears. Turns in one
   direction are the easy case: each strip lands where the panel finished long ago. A full
   refresh, whatever caused it, covers the whole screen, and a wipe in the other direction
   starts at the edge where the last one ended, so those turns wait this long since the last
   update. The Era Lite's panel takes 388 ms for its standard waveform; 350 ms tore there, and
   400 ms still tore now and then. If you reverse direction slowly, or turn the page long
-  after a flash, there is no wait.
+  after a flash, there is no wait. Two wipes in a row also start at least this far apart,
+  because a page with little text draws faster and would otherwise arrive early. That wait
+  comes right before the first strip, after the page is drawn. A full refresh that follows a
+  wipe, as at a chapter boundary, waits this long since the last strip, because it redraws
+  the whole screen at once. 430 ms left last strips as close as 413 ms after a slow wipe,
+  so the default keeps more margin.
 * **Animated turns in a row** (default no limit). Turns less than 0.7 s apart form a burst;
   from the chosen number on the wipe is dropped and the page is shown with a plain refresh,
   until the turns slow down again. A plain refresh also lands on strips the panel may still

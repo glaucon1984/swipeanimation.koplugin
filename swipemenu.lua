@@ -354,7 +354,7 @@ local function showFullGapDialog(Hook, touchmenu_instance)
         current = Hook.getConfiguredFullGapMs() or default_ms,
         min = 0,
         description = T(_([[
-Enter the minimum time before a page turn that follows a full refresh or changes direction, in milliseconds (0 to %1). A turn that comes sooner waits for the remainder before the new page is drawn.
+Enter the minimum time before a page turn that follows a full refresh or changes direction, in milliseconds (0 to %1). A turn that comes sooner waits for the remainder before the new page is drawn. Two wipes in a row also start at least this far apart, so a page that draws quickly cannot arrive early, and a full refresh right after a wipe waits this long too.
 
 0 disables the gap. Current default: %2 ms]]), Hook.MAX_MIN_GAP_MS, default_ms),
         save = function(value) Hook.setConfiguredFullGapMs(value) end,
@@ -505,7 +505,7 @@ A page that lands on an update the panel is still drawing can tear. That happens
 
 Lower it if those turns feel slow, and raise it again if they tear.
 
-Default: 430 ms on PocketBook, 0 (off) on other devices.]]),
+Default: 460 ms on PocketBook, 0 (off) on other devices.]]),
         },
         {
             text_func = function()

@@ -61,6 +61,11 @@
     are the easy case: each strip lands where the panel finished long ago.
     After a full refresh, or when the direction changes, the next page lands
     on an update the panel may still be drawing, so those get a longer gap.
+    Paint time counts towards the same-direction spacing too, so a page with
+    little text would land early: the first strip of a wipe therefore also
+    waits for that longer gap since the first strip of the last one. A flash
+    redraws everything at once, last strips included, so it waits for that
+    gap since the last update.
 
     Direct strips (black-and-white Kobo MTK panels, see
     directStripRefresh()): the strips are sent straight to the HWTCON driver
@@ -69,8 +74,15 @@
     full update that blocks until the panel is done, so through it a strip
     has to use the AUTO waveform. The panel is also woken at touch-down, as
     Nickel does, instead of right before the first strip.
+
+    Half turns (PocketBook, see installPageCopyHook()): the firmware turns the
+    task to the way the device was held at start, so only a device held the
+    other way up has a buffer turned 180°. KOReader's blitter then moves each
+    pixel through its rotation macros instead of copying rows, which on the
+    Era Lite took paint from 42 ms to 105 ms. The page is copied here instead.
 ]]
 
+local bit = require("bit")
 local Device = require("device")
 local Event = require("ui/event")
 local ffi = require("ffi")
@@ -94,7 +106,8 @@ local Hook = {
         min_gap_ms = { pocketbook = 250, other = 0 },
         burst_wipes = { pocketbook = 0, other = 0 }, -- 0 = no limit
         -- The Era Lite's GC16 takes 388 ms: 350 tears, 400 tore now and then.
-        full_gap_ms = { pocketbook = 430, other = 0 },
+        -- 430 was not enough for the last strip of a wipe after a slow one.
+        full_gap_ms = { pocketbook = 460, other = 0 },
     },
     MIN_STEPS = 2,
     MAX_STEPS = 32,
@@ -106,8 +119,8 @@ local Hook = {
     BURST_WINDOW_MS = 700,
     -- Nickel wakes the panel on touch, at most this often.
     MTK_WAKE_INTERVAL_MS = 1500,
-    -- A touch lift older than this did not cause the page turn being timed.
-    TIMING_TAP_WINDOW_MS = 1000,
+    -- A press older than this did not cause the page turn being timed.
+    TIMING_PRESS_WINDOW_MS = 1000,
 }
 
 local IMP_METHODS = {
@@ -501,22 +514,28 @@ local function span(from, to)
 end
 
 -- One line per page turn in crash.log, all in ms. first_strip ends when the
--- driver has taken the strip, about when the panel starts to change.
+-- driver has taken the strip, about when the panel starts to change. rotation
+-- is how the device is held, buffer how far the framebuffer is turned for it.
+-- spot is the time between the first strips of the last two wipes, hold the
+-- wait right before the update (part of first_strip on a wipe), last_update
+-- the time from the previous update to this one.
 local function logTurn(state)
     local t = state.t
     state.t = nil
-    local lift = state.lift_ms
-    state.lift_ms = nil
-    if lift and not (t.turn >= lift and t.turn - lift < Hook.TIMING_TAP_WINDOW_MS) then
-        lift = nil -- not a tap: a page-turn key, or an old touch
+    local seen = state.press_ms
+    local source = state.press_source
+    state.press_ms = nil
+    if not (seen and t.turn >= seen and t.turn - seen < Hook.TIMING_PRESS_WINDOW_MS) then
+        seen, source = nil, nil -- an old press, or the turn had no press of its own
     end
     local start = t.wake1 or t.refresh
-    local tap = lift and (lift - (state.lift_age_ms or 0))
+    local press = seen and (seen - (state.press_age_ms or 0))
     logger.info(string.format(
-        "SwipeAnimation timing: mode=%s tap_to_input=%s input_to_turn=%s turn_to_paint=%s paint=%s wake=%s first_strip=%s wipe=%s tap_to_first_strip=%s touch_wake=%s",
-        t.mode or "plain",
-        span(tap, lift), span(lift, t.turn), span(t.turn, t.paint), span(t.paint, t.refresh),
-        span(t.wake0, t.wake1), span(start, t.first), span(t.first, t.done), span(tap, t.first),
+        "SwipeAnimation timing: mode=%s source=%s dir=%s rotation=%s buffer=%s press_to_input=%s input_to_turn=%s turn_to_paint=%s paint=%s copy=%s wake=%s hold=%s last_update=%s first_strip=%s spot=%s wipe=%s press_to_first_strip=%s touch_wake=%s",
+        t.mode or "plain", source or "-", state.forward and "forward" or "back", t.rotation or "-", t.buffer or "-",
+        span(press, seen), span(seen, t.turn), span(t.turn, t.paint), span(t.paint, t.refresh),
+        span(t.copy0, t.copy1), span(t.wake0, t.wake1), span(t.hold0, t.hold1), span(t.last_update, t.hold1),
+        span(start, t.first), span(t.spot, t.hold1), span(t.first, t.done), span(press, t.first),
         state.touch_wake_cost_ms and string.format("%.0f", state.touch_wake_cost_ms) or "-"))
     state.touch_wake_cost_ms = nil
 end
@@ -534,14 +553,20 @@ local function wakePanel(state, screen)
     return state.last_wake_ms - start
 end
 
+-- Remember the latest press, so a turn is paired with what really caused it.
+local function notePress(state, detector, source, timev)
+    state.press_ms = Hook._clock_ms()
+    state.press_source = source
+    local ok, age = pcall(inputAgeMs, detector, timev)
+    state.press_age_ms = ok and age or nil
+end
+
 -- Sees every input frame before the gesture detector does.
 local function noteTouch(state, detector, tevs)
     for _, tev in ipairs(tevs) do
         if tev.id == -1 then
             if Hook.isTimingEnabled() then
-                state.lift_ms = Hook._clock_ms()
-                local ok, age = pcall(inputAgeMs, detector, tev.timev)
-                state.lift_age_ms = ok and age or nil
+                notePress(state, detector, "tap", tev.timev)
             end
         elseif not detector:getContact(tev.slot) then
             -- A new finger on the screen.
@@ -602,6 +627,102 @@ local function paceTurn(state)
     if wait > 0 then
         logger.dbg("SwipeAnimation: pacing the page turn by", wait, "ms")
         ffiUtil.usleep(math.floor(wait * 1000 + 0.5))
+    end
+end
+
+-- Sleep until full_gap_ms have passed since `from`, right before an update.
+local function holdUpdate(state, from)
+    mark(state, "hold0")
+    if state.t then state.t.last_update = state.last_update_ms end
+    local since = from and (Hook._clock_ms() - from) or math.huge
+    local wait = Hook.getFullGapMs() - since
+    if wait > 0 then
+        logger.dbg("SwipeAnimation: holding the update by", wait, "ms")
+        ffiUtil.usleep(math.floor(wait * 1000 + 0.5))
+    end
+    mark(state, "hold1")
+end
+
+-- Called right before the first strip of a wipe. paceTurn() sleeps before the
+-- page is painted, so a quick paint brings the wipe forward; this catches that.
+local function holdFirstStrip(state)
+    if state.t then state.t.spot = state.last_first_ms end
+    holdUpdate(state, state.last_first_ms)
+    state.last_first_ms = Hook._clock_ms()
+end
+
+-- ==================== half-turn page copy (PocketBook) ====================
+
+local BYTES = ffi.typeof("uint8_t *")
+local WORDS = ffi.typeof("int32_t *")
+local ADDRESS = ffi.typeof("uintptr_t")
+
+-- Copy a rectangle into a buffer turned 180°: rows land bottom first and
+-- reversed. Whole words through a byte swap, as a page is 1.5 million pixels,
+-- with writes aligned for the framebuffer.
+local function blitHalfTurned(dest, source, dest_x, dest_y, offs_x, offs_y, width, height)
+    local src_stride, dst_stride = tonumber(source.stride), tonumber(dest.stride)
+    local src_row = ffi.cast(BYTES, source.data) + offs_y * src_stride + offs_x
+    -- Where the first pixel of the row lands; the row then runs down in memory.
+    local dst_row = ffi.cast(BYTES, dest.data) + (dest.h - 1 - dest_y) * dst_stride + (dest.w - 1 - dest_x)
+    for _ = 1, height do
+        local lead = math.min(tonumber(ffi.cast(ADDRESS, dst_row - 3)) % 4, width)
+        for i = 0, lead - 1 do
+            dst_row[-i] = src_row[i]
+        end
+        local words = bit.rshift(width - lead, 2)
+        local src_word = ffi.cast(WORDS, src_row + lead)
+        local dst_word = ffi.cast(WORDS, dst_row - lead - 3)
+        for i = 0, words - 1 do
+            dst_word[-i] = bit.bswap(src_word[i])
+        end
+        for i = lead + words * 4, width - 1 do
+            dst_row[-i] = src_row[i]
+        end
+        src_row = src_row + src_stride
+        dst_row = dst_row - dst_stride
+    end
+end
+
+local function canBlitHalfTurned(dest, source, bb8, dest_x, dest_y, offs_x, offs_y, width, height)
+    return dest:getType() == bb8 and source:getType() == bb8
+        and dest:getRotation() == 2 and source:getRotation() == 0
+        and dest:getInverse() == 0 and source:getInverse() == 0
+        and dest_x >= 0 and dest_y >= 0 and offs_x >= 0 and offs_y >= 0
+        and dest_x + width <= dest.w and dest_y + height <= dest.h
+        and offs_x + width <= source.w and offs_y + height <= source.h
+end
+
+-- A rendered page reaches the screen through the target:blitFrom() call of
+-- CreDocument:drawCurrentView(). The blitter cannot be patched, FFI metatypes
+-- are fixed, so that call gets a stand-in target. Anything but a plain copy
+-- into a half-turned BB8 buffer goes to the real one.
+local function installPageCopyHook(state)
+    if not Hook.isPocketBook() then return end
+    local ok_bb, BB = pcall(require, "ffi/blitbuffer")
+    local ok_doc, CreDocument = pcall(require, "document/credocument")
+    if not (ok_bb and ok_doc and type(CreDocument) == "table" and type(CreDocument.drawCurrentView) == "function") then
+        logger.warn("SwipeAnimation: CreDocument.drawCurrentView not found, no half-turn page copy")
+        return
+    end
+    local stand_in = {}
+    function stand_in:blitFrom(source, dest_x, dest_y, offs_x, offs_y, width, height)
+        local dest = self.bb
+        if canBlitHalfTurned(dest, source, BB.TYPE_BB8, dest_x, dest_y, offs_x, offs_y, width, height) then
+            mark(state, "copy0")
+            blitHalfTurned(dest, source, dest_x, dest_y, offs_x, offs_y, width, height)
+            mark(state, "copy1")
+            return
+        end
+        return dest:blitFrom(source, dest_x, dest_y, offs_x, offs_y, width, height)
+    end
+    state.original_drawCurrentView = CreDocument.drawCurrentView
+    CreDocument.drawCurrentView = function(document, target, x, y, rect, pos)
+        if state.active and target:getRotation() == 2 then
+            stand_in.bb = target
+            target = stand_in
+        end
+        return state.original_drawCurrentView(document, target, x, y, rect, pos)
     end
 end
 
@@ -710,6 +831,7 @@ local function runStripWipe(state, screen, x, y, w, h, dither, forward)
     local edges = buildStripEdges(x, x + w, steps, align)
     local nslots = #edges - 1
 
+    holdFirstStrip(state)
     for i = 1, nslots do
         local idx = forward and (nslots - i + 1) or i
         local left, right = edges[idx], edges[idx + 1]
@@ -854,8 +976,10 @@ local function interceptRefreshImp(state, name, original)
 
         if not lcd and FLASHING[name] then
             -- KOReader asked for a flash (clearing refresh, chapter
-            -- boundary, image page): no animation, honour it.
+            -- boundary, image page): no animation, honour it. Unlike a wipe
+            -- it lands everywhere at once, on the last strips too.
             setTimingMode(state, "flash")
+            holdUpdate(state, state.last_update_ms)
             if Hook.isMildGlobalRefresh() and state.originals.refreshPartialImp then
                 logger.dbg("SwipeAnimation: mild global refresh instead of", name)
                 return passThrough(state, state.originals.refreshPartialImp, screen, x, y, w, h, dither)
@@ -868,6 +992,7 @@ local function interceptRefreshImp(state, name, original)
             -- Too many quick turns in a row for the panel controller
             -- (see paceTurn): plain refresh until the turns slow down.
             logger.dbg("SwipeAnimation: quick succession, plain refresh instead of a wipe")
+            holdUpdate(state, state.last_update_ms)
             return passThrough(state, original, screen, x, y, w, h, dither)
         end
 
@@ -964,7 +1089,7 @@ local function installScreenHooks(state)
         end
         state.pending = enabled and true or false
         if state.pending and state.active and state.display == "eink" and Hook.isTimingEnabled() then
-            state.t = { turn = Hook._clock_ms() }
+            state.t = { turn = Hook._clock_ms(), rotation = screen:getRotationMode(), buffer = screen.bb:getRotation() }
         end
     end
 
@@ -1018,9 +1143,10 @@ local function installPagingHook(state)
     end
 end
 
--- Touch-down panel wake and the tap time of the timing log.
+-- Touch-down panel wake and the press time of the timing log.
 local function installInputHook(state)
-    local detector = Device.input and Device.input.gesture_detector
+    local input = Device.input
+    local detector = input and input.gesture_detector
     if not detector or type(detector.feedEvent) ~= "function" then
         logger.warn("SwipeAnimation: gesture detector not found, no touch hook")
         return
@@ -1031,6 +1157,17 @@ local function installInputHook(state)
             noteTouch(state, self, tevs)
         end
         return state.original_feedEvent(self, tevs)
+    end
+
+    -- While input is inhibited, Input keeps the real handler aside.
+    local key_field = input._key_ev_handler and "_key_ev_handler" or "handleKeyBoardEv"
+    local original_key = input[key_field]
+    if type(original_key) ~= "function" then return end
+    input[key_field] = function(self, ev)
+        if state.active and ev.value == 1 and ev.code ~= ffi.C.BTN_TOUCH and Hook.isTimingEnabled() then
+            notePress(state, detector, "key", time.timeval(ev.time))
+        end
+        return original_key(self, ev)
     end
 end
 
@@ -1059,13 +1196,15 @@ function Hook.install()
         last_update_ms = nil, -- e-ink: when the last refresh was issued (Hook._clock_ms)
         last_full_ms = nil,   -- e-ink: when the last full refresh was issued
         last_wipe_forward = nil, -- e-ink: the direction of the last wipe
+        last_first_ms = nil,  -- e-ink: when the first strip of the last wipe was sent
         quick_turns = 0,      -- e-ink: consecutive page turns within BURST_WINDOW_MS
         skip_wipe = false,    -- e-ink: this turn is past the burst, plain refresh
         mtk_update = nil,     -- Kobo MTK: the update struct of the direct strips
         last_wake_ms = nil,   -- Kobo MTK: when the panel was last woken
         t = nil,              -- timing log: stage stamps of the current turn
-        lift_ms = nil,        -- timing log: when the last touch lift was seen
-        lift_age_ms = nil,    -- timing log: how old that lift was when seen
+        press_ms = nil,       -- timing log: when the last key press or touch lift was seen
+        press_age_ms = nil,   -- timing log: how old that press was when seen
+        press_source = nil,   -- timing log: "key" or "tap"
         touch_wake_cost_ms = nil, -- timing log: how long the last touch wake took
     }
     Screen._swipeanimation_state = state
@@ -1075,6 +1214,7 @@ function Hook.install()
     installPagingHook(state)
     if state.display == "eink" then
         installInputHook(state)
+        installPageCopyHook(state)
     end
     logger.info("SwipeAnimation: hooks installed, display class", state.display)
     return state
@@ -1090,7 +1230,7 @@ function Hook.setActive(active)
         state.quick_turns = 0
         state.skip_wipe = false
         state.t = nil
-        state.lift_ms = nil
+        state.press_ms = nil
         freeBuffer(state.old_bb)
         state.old_bb = nil
     end
